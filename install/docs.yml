@@ -1,0 +1,35 @@
+# Copy to .github/workflows/docs.yml in the repository you are gating.
+name: Docs
+
+# No paths filter. A required check that filters on paths never reports on a
+# pull request that changes no documents, and GitHub waits on it forever. This
+# runs on every pull request and the gate exits early instead.
+#
+# A green run here does not prove the pre-push hook is installed. Both callers
+# run the same script over the same commits, so CI cannot detect a missing
+# hook. What a red run does prove is that the block got past the hook.
+on:
+  pull_request:
+
+jobs:
+  distillation-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the gate measures against the merge base
+
+      # The gate measures against the merge base with the trunk. On a pull
+      # request the checkout is detached, so there is no local `main` and the
+      # script falls back to `origin/main`. The leading + forces the update, so
+      # this cannot fail when the ref is already present.
+      - name: Fetch the trunk
+        run: git fetch --no-tags origin +main:refs/remotes/origin/main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The gate has no dependencies, so there is nothing to install.
+      - name: Distillation gate
+        run: node scripts/check-docs.mjs

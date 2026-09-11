@@ -1,0 +1,34 @@
+{
+  "name": "docs-distillation-gate",
+  "version": "1.0.0",
+  "description": "A pre-push and CI gate that measures documentation compression from git history and blocks documents that were not distilled.",
+  "keywords": [
+    "documentation",
+    "ci",
+    "git-hooks",
+    "husky",
+    "technical-writing",
+    "ste",
+    "simplified-technical-english"
+  ],
+  "license": "MIT",
+  "author": "Jake Mosher",
+  "type": "module",
+  "exports": "./check-docs.mjs",
+  "bin": {
+    "docs-distill": "check-docs.mjs"
+  },
+  "files": [
+    "check-docs.mjs",
+    "install",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node check-docs.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

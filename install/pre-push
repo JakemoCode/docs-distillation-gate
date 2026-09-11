@@ -1,0 +1,24 @@
+# Copy to .husky/pre-push in the repository you are gating.
+#
+# The block below refuses a push straight to the trunk. It is independent of
+# the gate: delete it if the remote already has branch protection.
+#
+# It is not security - `--no-verify` walks straight past it - it is a rail for
+# the ordinary mistake: a script, an agent, or a person on the wrong branch.
+#
+# Git feeds one line per ref on stdin: <local ref> <local sha> <remote ref> <remote sha>.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/master)
+            echo "pre-push: refusing to push straight to ${remote_ref#refs/heads/}." >&2
+            echo "          Open a pull request instead:" >&2
+            echo "            git switch -c fix/<issue>-<slug>" >&2
+            echo "            git push -u origin HEAD" >&2
+            echo "            gh pr create" >&2
+            echo "          If you are certain, --no-verify is the deliberate way past this." >&2
+            exit 1
+            ;;
+    esac
+done
+
+npm run docs:check
