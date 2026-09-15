@@ -7,7 +7,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
+// The gate reads .docs-distill.json from the working directory when it loads.
+// Load it from an empty directory, or a repository that vendors this suite
+// alongside its own config fails tests that assume the defaults.
+const home = process.cwd();
+const emptyDir = mkdtempSync(join(tmpdir(), 'docs-distill-cwd-'));
+process.chdir(emptyDir);
+const {
   formatStamp,
   fencesBalance,
   verifyStamp,
@@ -18,7 +24,9 @@ import {
   readStamp,
   resolveBaseline,
   verdict,
-} from '../check-docs.mjs';
+} = await import('../check-docs.mjs');
+process.chdir(home);
+rmSync(emptyDir, { recursive: true, force: true });
 
 /** Build a document from lines, so fences can be written literally. */
 const doc = (...lines) => lines.join('\n') + '\n';
