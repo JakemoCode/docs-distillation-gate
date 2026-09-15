@@ -120,8 +120,7 @@ rather than copied.
    reports without blocking.
 4. Copy `install/pre-push` to `.husky/pre-push` and run `npm install` at the
    repository root. A workspace install does not write the hook.
-5. Copy `test/check-docs.test.mjs` if you want the suite, and run it with
-   `node --test`. It needs no dependencies either.
+5. Copy `test/check-docs.test.mjs` to `scripts/test/check-docs.test.mjs` if you want the suite, and run it with `node --test scripts/test/*.test.mjs`. Its import is `../check-docs.mjs`, so it has to sit one level below the gate. It needs no dependencies, and your `.docs-distill.json` does not affect it.
 
 Run it by hand at any time:
 
