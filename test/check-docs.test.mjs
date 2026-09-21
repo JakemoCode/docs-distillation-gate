@@ -893,6 +893,34 @@ test('an honest distillation is not reported as parking', async (t) => {
   assert.doesNotMatch(run.stdout, /left the count/);
 });
 
+// The refusal below is load-bearing beyond malformed markdown, and a fix that
+// moves it onto the document blob opens a bypass. An edit that retags a fenced
+// block's opener leaves the closer as context, so the added lines carry one
+// fence: the counter reads that slice, treats every later line as hidden, and
+// prose appended past the closer costs nothing. The document itself balances,
+// so only a check reading the slice catches it.
+test('prose added after a lopsided slice is not free', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.write(
+    'docs/runbook.md',
+    doc('Intro line here.', '```sh', 'old-cmd --flag', '```', 'Outro line here.'),
+  );
+  r.commit('docs: add the runbook');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write(
+    'docs/runbook.md',
+    doc('Intro line here.', '```bash', 'old-cmd --flag', '```', 'Outro line here.', lines(200)),
+  );
+  r.commit('docs: retag the block and append prose');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.notEqual(run.stdout, '', '200 added prose words cannot pass the gate in silence');
+});
+
 test('a document whose fences do not balance is refused, not measured', async (t) => {
   const r = repo(t);
   r.write('README.md', 'Root.');
