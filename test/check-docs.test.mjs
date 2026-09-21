@@ -1006,13 +1006,14 @@ test('an edit to a document whose fences do not balance is refused too', async (
   assert.match(run.stdout, /docs\/x\.md has an unclosed fenced block/);
 });
 
-// The refusal above keeps the path out of `blocks`, so an override naming it
-// used to fall in with the overrides that ran ahead of any block: the author
-// was told distillation was skipped, Actions raised a warning, and the push
-// failed regardless. Measuring balance against the document rather than the
-// slice puts an inherited stray fence in front of every contributor who edits
-// that file, so the accusation is now something they cannot avoid.
-test('an override on an unbalanced document is not reported as a skipped distillation', async (t) => {
+// Balance is read from the whole document, so the stray fence above stands in
+// front of everyone who edits that file and not only whoever wrote it. The
+// refusal keeps the path out of `blocks`, so an override naming it used to
+// fall in with the overrides that ran ahead of any block: the author was told
+// they had skipped a distillation the gate never performed, Actions raised a
+// warning, and the push failed anyway. --no-verify was the only way on, which
+// switches off every other check in the gate too.
+test('an override clears a refusal to measure, as it clears any other block', async (t) => {
   const r = repo(t);
   r.write('README.md', 'Root.');
   r.write('docs/x.md', `${lines(40)}\n\n\`\`\`\n${lines(300, 'free')}`);
@@ -1027,14 +1028,36 @@ test('an override on an unbalanced document is not reported as a skipped distill
   const run = runCli(r.dir);
 
   assertNoCrash(run);
+  assert.equal(run.code, 0, run.stdout);
+  assert.match(run.stdout, /Override: docs\/x\.md, cleared by Tester/);
+  // Cleared means cleared. A refusal printed beside an exit code of zero reads
+  // as a gate that could not make up its mind.
+  assert.doesNotMatch(run.stdout, /unclosed fenced block/);
   assert.doesNotMatch(run.stdout, /Distillation was skipped/);
   assert.doesNotMatch(run.stdout, /with no block behind/);
-  // Nor the opposite lie. The fence still blocks, so the override did not
-  // clear anything and must not be reported as though it had.
+});
+
+// The escape hatch is for a fence the branch inherited. Opened to every
+// refusal it becomes the cheapest bypass in the gate: one stray ``` in a new
+// draft and the document is never measured at all, so the trailer buys 300
+// uncounted words rather than the few the gate would have argued about.
+test('an override does not clear a fence the branch introduced', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.commit('chore: init');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/new.md', `${lines(40)}\n\n\`\`\`\n${lines(300, 'free')}`);
+  r.commit('docs: draft a page with a stray fence');
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: keep the fence\n\nDoc-distill-override: docs/new.md the fence is deliberate');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1, run.stdout);
+  assert.match(run.stdout, /docs\/new\.md has an unclosed fenced block/);
   assert.doesNotMatch(run.stdout, /cleared by/);
-  assert.match(run.stdout, /docs\/x\.md has an unclosed fenced block/);
-  assert.match(run.stdout, /override.*cannot clear an unclosed fence/i);
-  assert.equal(run.code, 1);
 });
 
 test('a small amount of parking is noise, not a finding', async (t) => {

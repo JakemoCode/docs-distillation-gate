@@ -81,7 +81,9 @@ Nobody writes a stamp described in prose.
 
 ## Overrides
 
-A commit trailer clears a block.
+A commit trailer clears a block. It also clears a refusal to measure, but only
+where the branch inherited the unclosed fence. One the branch opened has to be
+closed.
 
 ```
 Doc-distill-override: docs/wire-protocol.md would delete the wire format table

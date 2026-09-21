@@ -270,18 +270,22 @@ function git(repoDir, ...args) {
  * whether it landed inside a fenced block. Read at zero context, the hunk
  * header `@@ -l,s +start,count @@` describes exactly the added run.
  *
- * Every hunk counts. The caller limits the diff to one document's names with a
- * pathspec, so there is nothing else in it to pick out. When git fails to pair
- * a rename even at 5% similarity the document arrives as two halves: the
- * deleted one is `@@ -1,M +0,0 @@` and charges nothing, and the added one is
- * `@@ -0,0 +1,N @@` and charges the whole file. That is the right bill. A
+ * Every hunk counts, from whichever entry of the diff it came. When git fails
+ * to pair a rename even at 5% similarity the document arrives as two halves:
+ * the deleted one is `@@ -1,M +0,0 @@` and charges nothing, and the added one
+ * is `@@ -0,0 +1,N @@` and charges the whole file. That is the right bill. A
  * document sharing under 5% with what it replaced is a new draft wearing an
  * old name.
  *
- * Reading `+++ b/<path>` to scope by name would be the fragile way to reach
- * the same answer: git quotes that path when it holds a character it considers
- * special, the match would miss, and an empty set counts zero words and passes
- * the gate in silence.
+ * The caller's pathspec holds the names this document has had, so a branch
+ * that renames it and then writes a new document at the old name puts two
+ * entries in one diff and both are charged to the measured one. It over-bills
+ * the rename, which is loud and arguable, rather than under-billing it.
+ *
+ * Scoping by reading `+++ b/<path>` would be the fragile way to close that:
+ * git quotes the path when it holds a character it considers special, the
+ * match would miss, and an empty set counts zero words and passes in silence.
+ * The failure that costs less is the one to keep.
  */
 function addedLineNumbers(diff) {
   const added = new Set();
@@ -421,7 +425,7 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
     points.push({ sha, name, count: prose, hidden, text });
   }
 
-  return { kind, points, mergeBase };
+  return { kind, points, mergeBase, beforeBranch };
 }
 
 /** The index of the first highest point: the draft, after STE has raised it. */
@@ -625,7 +629,7 @@ function main() {
   const out0 = [];
 
   for (const path of changed) {
-    const { points } = measureCurve(repoDir, path, branch);
+    const { points, mergeBase, beforeBranch } = measureCurve(repoDir, path, branch);
     if (points.length === 0) continue;
 
     const last = points[points.length - 1];
@@ -634,7 +638,14 @@ function main() {
     // An unclosed fence inverts the counter for every line after it, so the
     // measurement below would be meaningless. Refuse rather than report.
     if (!fencesBalance(last.text)) {
-      unbalanced.push(path);
+      // Whether the trunk already carried the defect decides whether an
+      // override may wave it through. A contributor cannot be asked to fix
+      // someone else's fence before pushing, and equally cannot be handed a
+      // trailer that excuses their own: a stray ``` leaves the rest of the
+      // document uncounted, so overriding one the branch wrote buys the whole
+      // file rather than the few words a real block would have argued over.
+      const trunk = blobAt(repoDir, mergeBase, beforeBranch);
+      unbalanced.push({ path, inherited: trunk !== null && !fencesBalance(trunk) });
       continue;
     }
 
@@ -688,18 +699,20 @@ function main() {
   const out = [...out0];
   let failed = false;
 
-  for (const path of unbalanced) {
+  for (const { path, inherited } of unbalanced) {
+    // Balance is measured against the whole document, so a stray fence left on
+    // the trunk stands in front of everyone who edits that file afterwards and
+    // not only whoever wrote it. Without a way through, the one route left is
+    // --no-verify, which switches off every other check in the gate too. An
+    // override is that way through, and it is reported below with the rest.
+    if (inherited && overridden.has(path)) continue;
+
     out.push(
       `${path} has an unclosed fenced block, so its prose cannot be counted.`,
       '  Close the fence. One stray ``` makes every line after it free.',
     );
-    // An override clears a document the gate measured and judged. This one was
-    // never measured, so there is no verdict to overrule, and saying so beats
-    // both of the alternatives: reporting it as cleared when the push still
-    // fails, or counting it among the overrides that ran ahead of any block
-    // and telling the author they skipped a distillation they never reached.
     if (overridden.has(path)) {
-      out.push('  An override cannot clear an unclosed fence. Close it and push again.');
+      out.push('  The override does not apply. This branch opened the fence, so close it.');
     }
     failed = true;
   }
@@ -709,7 +722,15 @@ function main() {
     failed = true;
   }
 
-  const blockedNow = new Set(blocks.map((block) => block.path));
+  // A refusal to measure is a block, so an override answering one is reported
+  // as clearing a block rather than as having run ahead of any. That holds for
+  // a refusal the override could not clear too: the line above has already
+  // said so, and counting it again as a skipped distillation would describe a
+  // push that did not happen.
+  const blockedNow = new Set([
+    ...blocks.map((block) => block.path),
+    ...unbalanced.map((entry) => entry.path),
+  ]);
 
   for (const block of blocks) {
     if (overridden.has(block.path)) continue;
@@ -739,15 +760,19 @@ function main() {
   // line. One used before any block means distillation was skipped outright.
   // That count is what separates "the gate is calibrated wrong" from "the gate
   // is unwanted", so it goes on the check rather than into a log.
-  for (const override of overrides.filter((o) => o.valid && blockedNow.has(o.file))) {
+  // Reported as cleared only where it cleared something. A refusal the branch
+  // earned is still a block, so its override is not loud either, but the line
+  // above already said the trailer does not apply and this must not say it did.
+  const cleared = new Set([
+    ...blocks.filter((block) => overridden.has(block.path)).map((block) => block.path),
+    ...unbalanced.filter((e) => e.inherited && overridden.has(e.path)).map((e) => e.path),
+  ]);
+
+  for (const override of overrides.filter((o) => o.valid && cleared.has(o.file))) {
     out.push(`Override: ${override.file}, cleared by ${override.author} (${override.sha}).`);
   }
 
-  // A refused document is not a skipped distillation. It was never measured,
-  // so its override answered a refusal rather than running ahead of a verdict,
-  // and the line above has already told the author what to do about it.
-  const refused = new Set(unbalanced);
-  const loud = overrides.filter((o) => o.valid && !blockedNow.has(o.file) && !refused.has(o.file));
+  const loud = overrides.filter((o) => o.valid && !blockedNow.has(o.file));
   if (loud.length > 0) {
     out.push(
       `${loud.length} override(s) used with no block behind them. Distillation was skipped:`,
