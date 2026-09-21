@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -392,6 +392,66 @@ test('resolveBaseline still bills only the added lines when the branch renames t
   assert.equal(result.baseline, 10, 'the 200 words already on main are not billed');
 });
 
+// `git show` prints no diff for a merge commit by default, so a rename made
+// while resolving a trunk merge was invisible to the name walk. The document
+// then had no history under its old name, read as drafted by the branch, and
+// was billed for every word it had inherited: the better the document the
+// larger the bill, since the branch is charged for prose it only renamed.
+test('resolveBaseline follows a rename made by a merge commit', async (t) => {
+  const r = repo(t);
+  r.write('docs/a.md', lines(200));
+  r.commit('docs: add the page');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+
+  r.git('checkout', '-q', 'main');
+  r.write('other.txt', 'trunk moved on');
+  r.commit('chore: trunk work');
+
+  // The rename rides in on the merge, which is what hides it from `git show`.
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-commit', '--no-ff', 'main');
+  r.git('mv', 'docs/a.md', 'docs/b.md');
+  r.commit('chore: merge main and rename the page');
+
+  const result = resolveBaseline(r.dir, 'docs/b.md');
+
+  assert.equal(result.kind, 'edit', 'the page was inherited, not drafted here');
+  assert.equal(result.baseline, 0, 'a rename alone adds no prose');
+});
+
+// The other direction, and the common one: a teammate renames a document on
+// the trunk and the branch picks it up with a pull. A first-parent diff of the
+// merge reports that rename too, so a walk that treats every rename it sees as
+// the branch's own rewinds the name to one the trunk no longer has, finds
+// nothing under it at the merge base, and bills the branch for a document it
+// inherited. Halve a file you did not write, because someone else moved it.
+test('resolveBaseline does not read a rename the trunk made as the branch renaming', async (t) => {
+  const r = repo(t);
+  r.write('docs/a.md', lines(200));
+  r.commit('docs: add the page');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+
+  r.git('checkout', '-q', 'main');
+  r.git('mv', 'docs/a.md', 'docs/c.md');
+  r.commit('docs: rename the page on the trunk');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'main');
+  r.write('docs/c.md', `${lines(200)}\n${words(4)}`);
+  r.commit('docs: add a line to the renamed page');
+
+  const result = resolveBaseline(r.dir, 'docs/c.md');
+
+  assert.equal(result.kind, 'edit', 'the trunk renamed it, so the branch inherited it');
+  assert.equal(result.baseline, 4, 'only the four words this branch added');
+});
+
 test('resolveBaseline reports a file drafted on the branch as new', async (t) => {
   const r = repo(t);
   r.write('README.md', 'Root.');
@@ -601,6 +661,34 @@ test('an override after a real block clears it, and is reported in one quiet lin
   assert.equal(run.code, 0);
   assert.match(run.stdout, /Override: docs\/new\.md, cleared by Tester/);
   assert.doesNotMatch(run.stdout, /is not distilled/);
+});
+
+// The guard at the foot of the file compares its own module URL against
+// argv[1]. Node resolves a symlink before it records the module URL and the
+// shell does not, so the two disagree whenever the script is reached through
+// one and `main()` never runs. `package.json` declares a bin, so `npx
+// docs-distill` is exactly that path, and the failure is silent: a gate that
+// examined nothing and a gate that found nothing both exit 0.
+test('the gate runs when it is reached through a symlink', async (t) => {
+  const r = branchWithBlock(t);
+
+  const linkDir = mkdtempSync(join(tmpdir(), 'doc-gate-bin-'));
+  t.after(() => rmSync(linkDir, { recursive: true, force: true }));
+  const link = join(linkDir, 'docs-distill');
+  symlinkSync(CLI, link);
+
+  const direct = runCli(r.dir);
+  const viaLink = spawnSync(process.execPath, [link], {
+    cwd: r.dir,
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_ACTIONS: '' },
+  });
+
+  assertNoCrash(direct); // the control arm proves nothing if it exits 1 by crashing
+  assert.equal(direct.code, 1, 'the fixture blocks when the gate is run directly');
+  assert.equal(viaLink.stderr, '');
+  assert.equal(viaLink.status, 1, `reached through a symlink the gate printed: ${viaLink.stdout}`);
+  assert.match(viaLink.stdout, /docs\/new\.md is not distilled\./);
 });
 
 test('an override with no block behind it is reported loudly', async (t) => {
