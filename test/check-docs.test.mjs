@@ -259,6 +259,26 @@ function repo(t) {
   return { dir, git, write, commit };
 }
 
+// An edit is billed from its added lines, and a diff slice does not carry the
+// fences that surround it. Lines added inside a block that already exists on
+// the trunk arrive with no opening fence above them, so the counter reads them
+// as prose and a two-line change to a shell block asks the document to halve
+// eight words it never wrote.
+test('resolveBaseline does not bill code added inside an existing fenced block', async (t) => {
+  const r = repo(t);
+  r.write('docs/x.md', doc('Intro.', '```sh', 'old-cmd', '```', 'Outro.'));
+  r.commit('docs: add the page');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/x.md', doc('Intro.', '```sh', 'old-cmd', 'new-cmd --flag two', '```', 'Outro.'));
+  r.commit('docs: extend the block');
+
+  const result = resolveBaseline(r.dir, 'docs/x.md');
+
+  assert.equal(result.kind, 'edit');
+  assert.equal(result.baseline, 0, 'a line inside a fence is code wherever the fence was opened');
+});
+
 test('resolveBaseline bills only the added lines of a file that is already on main', async (t) => {
   const r = repo(t);
   r.write('docs/x.md', words(100));
@@ -893,6 +913,61 @@ test('an honest distillation is not reported as parking', async (t) => {
   assert.doesNotMatch(run.stdout, /left the count/);
 });
 
+// An edit that retags a block's opener leaves the closer as an unchanged
+// context line, so the added lines carry one fence where the document carries
+// two. Measured from the slice, the document read as unclosed and was refused,
+// and no override clears that refusal, so the branch could not be pushed.
+test('the gate measures a balanced document whose diff slice is not', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.write('docs/runbook.md', doc('Intro line here.', '```', 'old-cmd --flag', '```', 'Outro.'));
+  r.commit('docs: add the runbook');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/runbook.md', doc('Intro line here.', '```sh', 'new-cmd --flag', '```', 'Outro.'));
+  r.commit('docs: tag the block as shell');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.doesNotMatch(run.stdout, /unclosed fenced block/, 'the document closes every fence');
+  assert.equal(run.code, 0, run.stdout);
+  assert.equal(run.stdout, '');
+});
+
+// The refusal below is load-bearing beyond malformed markdown, and a fix that
+// moves it onto the document blob opens a bypass. An edit that retags a fenced
+// block's opener leaves the closer as context, so the added lines carry one
+// fence: the counter reads that slice, treats every later line as hidden, and
+// prose appended past the closer costs nothing. The document itself balances,
+// so only a check reading the slice catches it.
+test('prose added after a lopsided slice is not free', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.write(
+    'docs/runbook.md',
+    doc('Intro line here.', '```sh', 'old-cmd --flag', '```', 'Outro line here.'),
+  );
+  r.commit('docs: add the runbook');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write(
+    'docs/runbook.md',
+    doc('Intro line here.', '```bash', 'old-cmd --flag', '```', 'Outro line here.', lines(200)),
+  );
+  r.commit('docs: retag the block and append prose');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.notEqual(run.stdout, '', '200 added prose words cannot pass the gate in silence');
+  // Blocked for the right reason. Refusing to measure would also be non-empty
+  // output, and would mean the count is still being read off the slice.
+  assert.doesNotMatch(run.stdout, /unclosed fenced block/);
+  assert.match(run.stdout, /docs\/runbook\.md is not distilled\./);
+  assert.match(run.stdout, /current: *200 prose words/);
+});
+
 test('a document whose fences do not balance is refused, not measured', async (t) => {
   const r = repo(t);
   r.write('README.md', 'Root.');
@@ -908,6 +983,81 @@ test('a document whose fences do not balance is refused, not measured', async (t
   assertNoCrash(run);
   assert.equal(run.code, 1);
   assert.match(run.stdout, /docs\/x\.md has an unclosed fenced block/);
+});
+
+// The test above drafts the document, so its added lines are the whole file
+// and no slice can disagree with it. An edit can: the stray fence sits on the
+// trunk and the branch adds none, so a check reading the slice sees balanced
+// text and measures a count the stray fence has already voided.
+test('an edit to a document whose fences do not balance is refused too', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.write('docs/x.md', `${lines(40)}\n\n\`\`\`\n${lines(300, 'free')}`);
+  r.commit('docs: add a page with a stray fence');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/x.md', `${lines(40)}\n\n\`\`\`\n${lines(300, 'free')}\n${lines(20, 'added')}`);
+  r.commit('docs: add to the page');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1);
+  assert.match(run.stdout, /docs\/x\.md has an unclosed fenced block/);
+});
+
+// Balance is read from the whole document, so the stray fence above stands in
+// front of everyone who edits that file and not only whoever wrote it. The
+// refusal keeps the path out of `blocks`, so an override naming it used to
+// fall in with the overrides that ran ahead of any block: the author was told
+// they had skipped a distillation the gate never performed, Actions raised a
+// warning, and the push failed anyway. --no-verify was the only way on, which
+// switches off every other check in the gate too.
+test('an override clears a refusal to measure, as it clears any other block', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.write('docs/x.md', `${lines(40)}\n\n\`\`\`\n${lines(300, 'free')}`);
+  r.commit('docs: add a page with a stray fence');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/x.md', `${lines(40)}\n\n\`\`\`\n${lines(300, 'free')}\n${lines(20, 'added')}`);
+  r.commit('docs: add to the page');
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: note the fence\n\nDoc-distill-override: docs/x.md the fence predates this branch');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 0, run.stdout);
+  assert.match(run.stdout, /Override: docs\/x\.md, cleared by Tester/);
+  // Cleared means cleared. A refusal printed beside an exit code of zero reads
+  // as a gate that could not make up its mind.
+  assert.doesNotMatch(run.stdout, /unclosed fenced block/);
+  assert.doesNotMatch(run.stdout, /Distillation was skipped/);
+  assert.doesNotMatch(run.stdout, /with no block behind/);
+});
+
+// The escape hatch is for a fence the branch inherited. Opened to every
+// refusal it becomes the cheapest bypass in the gate: one stray ``` in a new
+// draft and the document is never measured at all, so the trailer buys 300
+// uncounted words rather than the few the gate would have argued about.
+test('an override does not clear a fence the branch introduced', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.commit('chore: init');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/new.md', `${lines(40)}\n\n\`\`\`\n${lines(300, 'free')}`);
+  r.commit('docs: draft a page with a stray fence');
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: keep the fence\n\nDoc-distill-override: docs/new.md the fence is deliberate');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1, run.stdout);
+  assert.match(run.stdout, /docs\/new\.md has an unclosed fenced block/);
+  assert.doesNotMatch(run.stdout, /cleared by/);
 });
 
 test('a small amount of parking is noise, not a finding', async (t) => {
