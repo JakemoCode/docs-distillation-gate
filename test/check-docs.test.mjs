@@ -476,8 +476,8 @@ test('resolveBaseline reports a file drafted on the branch as new', async (t) =>
 
 const CLI = fileURLToPath(new URL('../check-docs.mjs', import.meta.url));
 
-function runCli(repoDir, env = {}) {
-  const result = spawnSync(process.execPath, [CLI], {
+function runCli(repoDir, env = {}, args = []) {
+  const result = spawnSync(process.execPath, [CLI, ...args], {
     cwd: repoDir,
     encoding: 'utf8',
     env: { ...process.env, GITHUB_ACTIONS: '', ...env },
@@ -592,6 +592,62 @@ test('the gate never examines a document outside the allowlist', async (t) => {
   assertNoCrash(run);
   assert.equal(run.code, 0);
   assert.equal(run.stdout, '');
+});
+
+// A mistyped flag is the same failure as a missing one, and worse for being
+// invisible: --summery reads as no flag at all, the gate goes quiet, and the
+// check stays green having reported nothing. A workflow file carries the flag
+// for years without anyone reading it again, so the typo has to be caught the
+// one time a person is watching, which is the run right after they write it.
+test('an unknown argument is refused rather than ignored', async (t) => {
+  const r = branchWithBlock(t);
+
+  const run = runCli(r.dir, {}, ['--summery']);
+
+  assert.notEqual(run.code, 0, 'a flag the gate does not know must not look like success');
+  assert.match(run.stderr, /--summery/);
+});
+
+// Silence is the gate's success signal and also what every failure this tool
+// has had looks like from outside: a measurement read off the wrong text, a
+// guard that skipped the file, an entry point that never ran. All three exited
+// 0 saying nothing, which is the same thing a clean branch does. --summary is
+// the one mode that always writes a line, so empty output under it means the
+// script did not run rather than that it found nothing.
+test('--summary reports even when no gated document changed', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.commit('chore: init');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('src/app.js', 'const x = 1;');
+  r.commit('feat: code only, no documents');
+
+  const quiet = runCli(r.dir);
+  const summary = runCli(r.dir, {}, ['--summary']);
+
+  assertNoCrash(quiet);
+  assertNoCrash(summary);
+  assert.equal(quiet.stdout, '', 'the hook stays quiet, which is why --summary exists');
+  assert.equal(summary.code, 0);
+  assert.match(summary.stdout, /docs-distill examined no gated documents/);
+});
+
+// The count is the diagnostic. A document whose chargeable prose reads 0 beside
+// a diff that plainly added prose is the shape of every mis-measurement here,
+// and it is only visible if the number is printed somewhere.
+test('--summary names each document it examined and what it counted', async (t) => {
+  const r = branchWithBlock(t);
+
+  const run = runCli(r.dir, {}, ['--summary']);
+
+  assertNoCrash(run);
+  assert.match(run.stdout, /docs-distill examined 1 gated document\./);
+  assert.match(run.stdout, /docs\/new\.md \(new\): 100 -> 100 prose words/);
+  // The verdict is unchanged. A reporting flag that also alters the outcome
+  // would be a second code path to keep honest.
+  assert.equal(run.code, 1);
+  assert.match(run.stdout, /docs\/new\.md is not distilled\./);
 });
 
 // A required check must not carry a paths filter: a filtered check never

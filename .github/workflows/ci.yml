@@ -9,6 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the liveness step below measures against the merge base
+
+      # A pull request checks out detached with no local main, so the gate
+      # falls back to origin/main and that ref has to be here. The leading +
+      # forces the update, so this cannot fail when it is already present.
+      - name: Fetch the trunk
+        run: git fetch --no-tags origin +main:refs/remotes/origin/main
 
       - uses: actions/setup-node@v4
         with:
@@ -25,3 +33,21 @@ jobs:
       # No dependencies. The gate and its suite are node built-ins only.
       - name: Test
         run: npm test
+
+      # This repository ships a pre-push hook and does not install one, so
+      # until now nothing gated its own documents and an undistilled page
+      # merged green. The verdict is enforced here.
+      #
+      # The liveness assertion is the other half. --summary always writes a
+      # line, so empty output means the script never reached main() and every
+      # check it performs was skipped in silence, which on its own is
+      # indistinguishable from a clean branch.
+      - name: Distillation gate
+        run: |
+          set +e
+          summary=$(node check-docs.mjs --summary)
+          status=$?
+          set -e
+          echo "$summary"
+          test -n "$summary"
+          exit $status
