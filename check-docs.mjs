@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -321,6 +321,37 @@ function blobAt(repoDir, rev, path) {
   }
 }
 
+// Set false the first time git rejects --diff-merges. The answer cannot change
+// within a run, and without it every call on an old git pays a failed `git
+// show` before the real one: once per branch commit, per document, twice over
+// because verifyStamp measures the curve again.
+let diffMergesSupported = true;
+
+/**
+ * The renamed-file status of one commit, merges included.
+ *
+ * `--diff-merges` arrived in git 2.31, and Debian 10 and Ubuntu 20.04 ship
+ * older. A gate that dies inside a pre-push hook with a stack trace is worse
+ * than one that misses a rename made by a merge, so it takes that defect back
+ * rather than taking the whole check down.
+ *
+ * Only the option being rejected earns the fallback. A `git show` that fails
+ * for any other reason must not quietly return the answer this flag exists to
+ * correct, so it is rethrown.
+ */
+function nameStatus(repoDir, sha) {
+  const base = ['show', RENAME_THRESHOLD, '--name-status', '--format='];
+  if (!diffMergesSupported) return git(repoDir, ...base, sha);
+
+  try {
+    return git(repoDir, ...base, '--diff-merges=first-parent', sha);
+  } catch (error) {
+    if (!/diff-merges/.test(String(error.stderr ?? ''))) throw error;
+    diffMergesSupported = false;
+    return git(repoDir, ...base, sha);
+  }
+}
+
 /**
  * The name this document carried at each branch commit, newest first, and the
  * name it carried before the branch began.
@@ -339,7 +370,13 @@ function nameHistory(repoDir, path, commits) {
 
   const history = commits.map((sha) => {
     const at = { sha, name };
-    const status = git(repoDir, 'show', RENAME_THRESHOLD, '--name-status', '--format=', sha);
+    // A merge commit prints no diff by default, so a rename made while
+    // resolving a trunk merge would vanish and the document would read as
+    // drafted by this branch. Reading the merge along its first parent shows
+    // it. That view also reports the renames the merge carried in from the
+    // trunk, which is why the name this walk lands on is a candidate rather
+    // than an answer: `measureCurve` settles it against the merge base.
+    const status = nameStatus(repoDir, sha);
 
     for (const line of status.split('\n')) {
       const renamed = /^R\d*\t(.+)\t(.+)$/.exec(line);
@@ -401,7 +438,15 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
   // new content untouched, converge, and pass. The name tested is the one the
   // document has on the trunk, so renaming it does not turn an edit into a
   // draft and bill the branch for prose it inherited.
-  const kind = existsAt(repoDir, mergeBase, beforeBranch) ? 'edit' : 'new';
+  //
+  // Which name that is has to be asked of the trunk rather than inferred from
+  // the walk. The walk reads a merge along its first parent, so it sees the
+  // renames the merge carried in from the trunk as well as any the merge made,
+  // and rewinding through the first kind lands on a name the trunk has already
+  // stopped using. Whichever of the names is present at the merge base is the
+  // one the branch inherited, whoever moved it and whenever.
+  const trunkName = names.find((name) => existsAt(repoDir, mergeBase, name));
+  const kind = trunkName === undefined ? 'new' : 'edit';
 
   const points = [];
   for (const { sha, name } of [...history].reverse()) {
@@ -425,7 +470,7 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
     points.push({ sha, name, count: prose, hidden, text });
   }
 
-  return { kind, points, mergeBase, beforeBranch };
+  return { kind, points, mergeBase, trunkName };
 }
 
 /** The index of the first highest point: the draft, after STE has raised it. */
@@ -629,7 +674,7 @@ function main() {
   const out0 = [];
 
   for (const path of changed) {
-    const { points, mergeBase, beforeBranch } = measureCurve(repoDir, path, branch);
+    const { points, mergeBase, trunkName } = measureCurve(repoDir, path, branch);
     if (points.length === 0) continue;
 
     const last = points[points.length - 1];
@@ -644,7 +689,9 @@ function main() {
       // trailer that excuses their own: a stray ``` leaves the rest of the
       // document uncounted, so overriding one the branch wrote buys the whole
       // file rather than the few words a real block would have argued over.
-      const trunk = blobAt(repoDir, mergeBase, beforeBranch);
+      // No trunk name means the branch drafted the document, so there is
+      // nothing it could have inherited the fence from.
+      const trunk = trunkName === undefined ? null : blobAt(repoDir, mergeBase, trunkName);
       unbalanced.push({ path, inherited: trunk !== null && !fencesBalance(trunk) });
       continue;
     }
@@ -787,6 +834,24 @@ function main() {
   process.exitCode = failed ? 1 : 0;
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * The path this process was started with, resolved through any symlink.
+ *
+ * Node resolves a symlink before it records `import.meta.url`, and argv[1] is
+ * whatever the shell handed over. Comparing the two raw makes the gate skip
+ * itself whenever it is reached through a link: `npx docs-distill` runs the bin
+ * shim, and on macOS a repository under /tmp is enough on its own. It exits 0
+ * having examined nothing, which is indistinguishable from a clean branch.
+ */
+function invokedPath() {
+  if (process.argv[1] === undefined) return null;
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return pathToFileURL(process.argv[1]).href; // unreadable path, compare as given
+  }
+}
+
+if (import.meta.url === invokedPath()) {
   main();
 }
