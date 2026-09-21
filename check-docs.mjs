@@ -175,16 +175,23 @@ const countTokens = (text) =>
  * Every zone excluded from prose is a place prose can be parked instead of cut,
  * so the two are counted together and reported apart.
  */
-function countWords(text) {
+function countWords(text, chargeable = null) {
   let prose = 0;
   let hidden = 0;
   let fenced = false;
+  let lineNumber = 0;
 
   for (const line of text.split('\n')) {
+    lineNumber += 1;
+
+    // Fence state is read from every line, but only the chargeable ones are
+    // counted. An edit is billed for what it added and a fence is code
+    // wherever it was opened, so the two cannot be the same set of lines.
     if (line.trimStart().startsWith('```')) {
       fenced = !fenced;
       continue;
     }
+    if (chargeable !== null && !chargeable.has(lineNumber)) continue;
 
     const trimmed = line.trim();
     if (fenced || trimmed.startsWith('<!--')) {
@@ -256,13 +263,39 @@ function git(repoDir, ...args) {
   });
 }
 
-/** The added lines of a unified diff, as text. */
-function addedLines(diff) {
-  return diff
-    .split('\n')
-    .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
-    .map((line) => line.slice(1))
-    .join('\n');
+/**
+ * The lines a unified diff adds, as line numbers in the new file.
+ *
+ * Numbers rather than text, because the text of an added line does not say
+ * whether it landed inside a fenced block. Read at zero context, the hunk
+ * header `@@ -l,s +start,count @@` describes exactly the added run.
+ *
+ * Every hunk counts. The caller limits the diff to one document's names with a
+ * pathspec, so there is nothing else in it to pick out. When git fails to pair
+ * a rename even at 5% similarity the document arrives as two halves: the
+ * deleted one is `@@ -1,M +0,0 @@` and charges nothing, and the added one is
+ * `@@ -0,0 +1,N @@` and charges the whole file. That is the right bill. A
+ * document sharing under 5% with what it replaced is a new draft wearing an
+ * old name.
+ *
+ * Reading `+++ b/<path>` to scope by name would be the fragile way to reach
+ * the same answer: git quotes that path when it holds a character it considers
+ * special, the match would miss, and an empty set counts zero words and passes
+ * the gate in silence.
+ */
+function addedLineNumbers(diff) {
+  const added = new Set();
+
+  for (const line of diff.split('\n')) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (hunk === null) continue;
+
+    const start = Number(hunk[1]);
+    const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    for (let i = 0; i < count; i += 1) added.add(start + i);
+  }
+
+  return added;
 }
 
 /** True when `path` exists in the tree of `rev`. */
@@ -368,17 +401,24 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
 
   const points = [];
   for (const { sha, name } of [...history].reverse()) {
-    // Hidden words are measured in the same scope as prose, or an edit would
-    // compare added lines against a whole file.
-    let text;
-    if (kind === 'new') {
-      text = blobAt(repoDir, sha, name);
-      if (text === null) continue; // the document did not exist yet
-    } else {
-      text = addedLines(git(repoDir, 'diff', RENAME_THRESHOLD, mergeBase, sha, '--', ...names));
-    }
+    // Both kinds read the whole document. A draft is billed for all of it and
+    // an edit only for the lines it added, but the text those lines are read
+    // in is the same either way. Counting an edit from the diff slice alone
+    // loses the fences around it, which both bills code as prose and hands
+    // back prose as free, and leaves `fencesBalance` below describing a slice
+    // rather than the document it is supposed to guard.
+    const text = blobAt(repoDir, sha, name);
+    if (text === null) continue; // the document did not exist yet
 
-    points.push({ sha, name, count: proseWords(text), hidden: hiddenWords(text), text });
+    const chargeable =
+      kind === 'new'
+        ? null
+        : addedLineNumbers(
+            git(repoDir, 'diff', RENAME_THRESHOLD, '--unified=0', mergeBase, sha, '--', ...names),
+          );
+
+    const { prose, hidden } = countWords(text, chargeable);
+    points.push({ sha, name, count: prose, hidden, text });
   }
 
   return { kind, points, mergeBase };
@@ -653,6 +693,14 @@ function main() {
       `${path} has an unclosed fenced block, so its prose cannot be counted.`,
       '  Close the fence. One stray ``` makes every line after it free.',
     );
+    // An override clears a document the gate measured and judged. This one was
+    // never measured, so there is no verdict to overrule, and saying so beats
+    // both of the alternatives: reporting it as cleared when the push still
+    // fails, or counting it among the overrides that ran ahead of any block
+    // and telling the author they skipped a distillation they never reached.
+    if (overridden.has(path)) {
+      out.push('  An override cannot clear an unclosed fence. Close it and push again.');
+    }
     failed = true;
   }
 
@@ -695,7 +743,11 @@ function main() {
     out.push(`Override: ${override.file}, cleared by ${override.author} (${override.sha}).`);
   }
 
-  const loud = overrides.filter((o) => o.valid && !blockedNow.has(o.file));
+  // A refused document is not a skipped distillation. It was never measured,
+  // so its override answered a refusal rather than running ahead of a verdict,
+  // and the line above has already told the author what to do about it.
+  const refused = new Set(unbalanced);
+  const loud = overrides.filter((o) => o.valid && !blockedNow.has(o.file) && !refused.has(o.file));
   if (loud.length > 0) {
     out.push(
       `${loud.length} override(s) used with no block behind them. Distillation was skipped:`,
