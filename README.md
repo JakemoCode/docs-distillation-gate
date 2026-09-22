@@ -17,14 +17,14 @@ ways:
 Otherwise the push fails, and the gate tells you how many words you still need
 to cut. Documents under 50 prose words are exempt.
 
-It runs twice: as a pre-push hook on your machine, and again in CI.
+It runs as a pre-push hook, then again in CI.
 
 ## How to use it
 
 ### Install
 
-It's one file with no dependencies. You copy it in. Husky, for the hook, is the
-only thing you install.
+It's one file with no dependencies, so you copy it in. Only Husky, for the
+hook, gets installed.
 
 1. Copy `check-docs.mjs` to `scripts/check-docs.mjs`.
 2. Add these scripts to `package.json` and run `npm install -D husky`:
@@ -59,13 +59,12 @@ document's peak, current count, and the count it needs.
 
 Add `--summary` to list every document it measured and the count it took.
 It always prints something, so silence means the gate never ran. CI uses it
-because otherwise a gate that checked nothing looks the same as one that found
-nothing.
+so a gate that checked nothing can't pass for one that found nothing.
 
 ### When it blocks you
 
-Cut in passes and commit each one. Each commit is a point on the curve. The
-gate prints this method whenever it blocks:
+Cut in passes, one commit each. The gate prints this method whenever it
+blocks:
 
 1. Rewrite in ASD-STE100 Simplified Technical English. Grammar only.
 2. Turn it into a procedure, a table, or a list if the content allows. Step 1
@@ -123,7 +122,7 @@ Three settings live in an optional `.docs-distill.json` at the repo root:
 }
 ```
 
-A broken config throws. A gate that silently checks nothing is worse.
+A broken config throws instead of silently checking nothing.
 
 ## Why I built it
 
