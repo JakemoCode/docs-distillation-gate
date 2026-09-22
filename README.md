@@ -2,12 +2,20 @@
 
 ## What it does
 
-It blocks a push when a document hasn't been cut down enough.
+Agents love prose. Prose rots brains. This forces agents to rewrite or
+altogether remove prose, until a document is half its size or cutting stops
+paying off.
 
-Every time you commit a draft, the gate counts its words. When you push, it
-looks back over those counts and checks that the document shrank. If it never
-got to half the length of its longest draft, the push fails and the gate tells
-you how many words you still need to cut.
+Every commit of a draft is a data point: the gate counts its prose words. When
+you push, it reads those counts as a curve, and a document passes one of two
+ways:
+
+- **It hit the target.** It's at half its longest draft or less.
+- **It converged.** It has had at least 3 passes, the last 2 each cut less than
+  5%, and it stopped at 65% or less of its longest draft.
+
+Otherwise the push fails, and the gate tells you how many words you still need
+to cut. Documents under 50 prose words are exempt.
 
 It runs twice: as a pre-push hook on your machine, and again in CI.
 
