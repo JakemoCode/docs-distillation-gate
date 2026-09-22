@@ -54,8 +54,8 @@ hook, gets installed.
 npm run docs:check
 ```
 
-Exit code 1 means something is blocked. The output shows each blocked
-document's peak, current count, and the count it needs.
+Exit code 1 means something is blocked, and the output shows each one's peak,
+current count, and target.
 
 Add `--summary` to list every document it measured and the count it took.
 It always prints something, so silence means the gate never ran. CI uses it
@@ -162,13 +162,12 @@ that's all this makes visible.
 CI can't tell if the hook is missing, since both run the same script on the
 same commits.
 
-The 65% ceiling came from a small sample. Treat early curves in a new repo as
+The 65% ceiling came from a small sample, so treat early curves as
 calibration.
 
 ## Where it came from
 
 I pulled it out of a private game repo, where it has checked every doc since
-August 2026. For this release, the repo's ignore list became the config file
-and the fixtures lost their private names.
+August 2026.
 
 MIT licensed. 82 tests, `node --test`, no dependencies.
