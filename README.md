@@ -178,6 +178,11 @@ nothing is worse than a gate that stops.
 | Prose moved into code examples is reported, never blocked | Step 2 moves real prose into real examples, so the signal is strong but not certain, and a gate that blocks on a guess is a gate people turn off |
 | The workflow has no paths filter | A required check that filters on paths never reports on a pull request that changes no document, and GitHub waits on it forever |
 
+## Seeing what it measured
+
+`--summary` names every document measured and the count taken from it, and
+always writes a line. Silence under it means the gate never ran.
+
 ## What it cannot do
 
 It cannot detect padding, and it measures process rather than quality. A writer
