@@ -1,3 +1,4 @@
+<!-- distilled: 41def81:README.md 1424->953->933->909 (63.8%) converged pass=3 -->
 # docs-distillation-gate
 
 ## What it does
