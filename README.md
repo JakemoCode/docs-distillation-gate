@@ -58,6 +58,12 @@ npm run docs:check
 Exit code 1 means at least one document is blocked. For each one, the output
 shows where it started, where it is now, and the number it needs to reach.
 
+Add `--summary` to see what it actually looked at. It lists every document it
+measured with the word count it took, and it always prints at least one line.
+If you get nothing at all, the gate never ran. The CI workflow in `install/`
+uses it for that reason: without it, a gate that checked nothing and a gate
+that found nothing both come back green and silent.
+
 ### When it blocks you
 
 Cut the document in passes and commit after each one. Every commit adds a point
@@ -218,4 +224,4 @@ the stamp against git`.
 For this release, the repo-specific ignore list became the optional config file
 and the test fixtures lost their private names. The measurement is the same.
 
-MIT licensed. 79 tests, run with `node --test`, no dependencies.
+MIT licensed. 82 tests, run with `node --test`, no dependencies.

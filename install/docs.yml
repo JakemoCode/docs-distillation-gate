@@ -8,6 +8,10 @@ name: Docs
 # A green run here does not prove the pre-push hook is installed. Both callers
 # run the same script over the same commits, so CI cannot detect a missing
 # hook. What a red run does prove is that the block got past the hook.
+#
+# It runs with --summary so the log names every document measured and the
+# count taken from it. Without that a gate that examined nothing looks exactly
+# like a gate that found nothing: both are green and both say not one word.
 on:
   pull_request:
 
@@ -31,5 +35,15 @@ jobs:
           node-version: 22
 
       # The gate has no dependencies, so there is nothing to install.
+      # The summary is asserted, not just printed. A flag that is only read by
+      # a human is a flag nobody reads, and the state it exists to expose is
+      # the state where there is nothing on screen to notice.
       - name: Distillation gate
-        run: node scripts/check-docs.mjs
+        run: |
+          set +e
+          summary=$(node scripts/check-docs.mjs --summary)
+          status=$?
+          set -e
+          echo "$summary"
+          test -n "$summary"
+          exit $status

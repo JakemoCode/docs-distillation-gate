@@ -660,6 +660,19 @@ function reportBlock({ path, rev, baseline, current }) {
 }
 
 function main() {
+  // An unrecognised argument is refused rather than ignored. The flag below
+  // lives in a workflow file that nobody reads again once it works, so a typo
+  // in it would otherwise read as no flag at all: the gate goes quiet, the
+  // check stays green, and the silence it exists to expose is the silence it
+  // produces. The one moment anyone is watching is the run after they edit it.
+  const unknown = process.argv.slice(2).filter((arg) => arg !== '--summary');
+  if (unknown.length > 0) {
+    process.stderr.write(`docs-distill: unknown argument ${unknown.join(' ')}\n`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const summaryWanted = process.argv.includes('--summary');
   const repoDir = process.cwd();
   const branch = branchOf(repoDir);
   const mergeBase = branch.mergeBase;
@@ -672,9 +685,10 @@ function main() {
   const unproved = [];
   const unbalanced = [];
   const out0 = [];
+  const examined = [];
 
   for (const path of changed) {
-    const { points, mergeBase, trunkName } = measureCurve(repoDir, path, branch);
+    const { kind, points, mergeBase, trunkName } = measureCurve(repoDir, path, branch);
     if (points.length === 0) continue;
 
     const last = points[points.length - 1];
@@ -693,6 +707,7 @@ function main() {
       // nothing it could have inherited the fence from.
       const trunk = trunkName === undefined ? null : blobAt(repoDir, mergeBase, trunkName);
       unbalanced.push({ path, inherited: trunk !== null && !fencesBalance(trunk) });
+      examined.push(`  ${path} (${kind}): refused, unclosed fence`);
       continue;
     }
 
@@ -708,6 +723,8 @@ function main() {
     const curve = curveOf(points);
     const current = last.count;
     const { pass, reason } = verdict(curve);
+
+    examined.push(`  ${path} (${kind}): ${curve[0]} -> ${current} prose words`);
 
     const stamp = readStamp(blobAt(repoDir, 'HEAD', path) ?? '');
     const stampMatches = stamp !== null && stamp.counts[stamp.counts.length - 1] === current;
@@ -743,7 +760,23 @@ function main() {
     });
   }
 
-  const out = [...out0];
+  // Reporting only, and always at least one line. Blocks print themselves; a
+  // gate that measured nothing prints nothing, and that is the state this flag
+  // exists to make visible. It stays opt-in because most pushes touch no
+  // document, and a hook with something to say on every push gets uninstalled.
+  // "Examined" rather than "measured", because a document refused for an
+  // unclosed fence is listed here too and measuring it is the one thing that
+  // did not happen. A report whose job is honesty about what the gate saw
+  // cannot open by counting a measurement it declined to take.
+  const out = summaryWanted
+    ? [
+        examined.length === 0
+          ? 'docs-distill examined no gated documents.'
+          : `docs-distill examined ${examined.length} gated document${examined.length === 1 ? '' : 's'}.`,
+        ...examined,
+        ...out0,
+      ]
+    : [...out0];
   let failed = false;
 
   for (const { path, inherited } of unbalanced) {
