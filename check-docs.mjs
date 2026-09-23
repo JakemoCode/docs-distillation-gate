@@ -39,7 +39,6 @@ const TARGET_RATIO = 0.5; // the target: half the baseline
 const CONVERGED_CEILING = 0.65; // a curve that cannot reach half may stop here
 const WEAK_PASS_RATIO = 0.05; // a pass removing less than this is weak
 const WEAK_PASSES_TO_CONVERGE = 2; // two, so one weak pass cannot stop early
-const MINIMUM_PASSES = 3; // guards thrashing, not gaming
 const SHORT_EDIT_FLOOR = 50; // below this many baseline words the gate is off
 
 // Parking. Every zone excluded from the prose count is somewhere prose can be
@@ -74,8 +73,10 @@ export function verdict(counts) {
     return from === 0 ? 1 : (from - count) / from;
   });
 
+  // No minimum pass count is needed. Two weak passes from the peak end above
+  // 90% of it, over the ceiling, so a converged curve always has a real cut
+  // before them: three passes at least.
   const converged =
-    removals.length >= MINIMUM_PASSES &&
     removals.slice(-WEAK_PASSES_TO_CONVERGE).every((share) => share < WEAK_PASS_RATIO) &&
     current <= baseline * CONVERGED_CEILING;
 

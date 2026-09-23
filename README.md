@@ -144,6 +144,10 @@ A document that already exists on the trunk is only billed for the lines your
 branch added. Otherwise you could add five lines to a long doc and pass by
 trimming 4% of text you didn't write.
 
+[distill-prose](https://github.com/JakemoCode/distill-prose) ports this
+counter to Python. Both must pass `test/fixtures/counting`, so they count
+the same.
+
 ### Choices that might surprise you
 
 | Choice | Why |
@@ -171,4 +175,4 @@ calibration.
 I pulled it out of a private game repo, where it has checked every doc since
 August 2026.
 
-MIT licensed. 82 tests, `node --test`, no dependencies.
+MIT licensed. 105 tests, `node --test`, no dependencies.
