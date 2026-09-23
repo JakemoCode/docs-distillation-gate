@@ -1,0 +1,169 @@
+{
+  "docs": {
+    "01-plain.md": {
+      "prose": 12,
+      "hidden": 0,
+      "balanced": true
+    },
+    "02-syntax.md": {
+      "prose": 19,
+      "hidden": 0,
+      "balanced": true
+    },
+    "03-fence.md": {
+      "prose": 6,
+      "hidden": 5,
+      "balanced": true
+    },
+    "04-inline-code.md": {
+      "prose": 6,
+      "hidden": 6,
+      "balanced": true
+    },
+    "05-comment.md": {
+      "prose": 3,
+      "hidden": 5,
+      "balanced": true
+    },
+    "06-table.md": {
+      "prose": 8,
+      "hidden": 1,
+      "balanced": true
+    },
+    "07-numbers-hyphens.md": {
+      "prose": 21,
+      "hidden": 0,
+      "balanced": true
+    },
+    "08-indented-fence.md": {
+      "prose": 2,
+      "hidden": 3,
+      "balanced": true
+    },
+    "09-unclosed.md": {
+      "prose": 1,
+      "hidden": 5,
+      "balanced": false
+    },
+    "10-frontmatter.md": {
+      "prose": 11,
+      "hidden": 0,
+      "balanced": true
+    },
+    "11-attached-syntax.md": {
+      "prose": 19,
+      "hidden": 0,
+      "balanced": true
+    }
+  },
+  "curves": [
+    {
+      "counts": [
+        40
+      ],
+      "pass": true,
+      "reason": "floor"
+    },
+    {
+      "counts": [
+        49,
+        10
+      ],
+      "pass": true,
+      "reason": "floor"
+    },
+    {
+      "counts": [
+        200
+      ],
+      "pass": false,
+      "reason": "blocked"
+    },
+    {
+      "counts": [
+        200,
+        100
+      ],
+      "pass": true,
+      "reason": "target"
+    },
+    {
+      "counts": [
+        200,
+        101
+      ],
+      "pass": false,
+      "reason": "blocked"
+    },
+    {
+      "counts": [
+        200,
+        150,
+        130
+      ],
+      "pass": false,
+      "reason": "blocked"
+    },
+    {
+      "counts": [
+        200,
+        150,
+        130,
+        125,
+        121
+      ],
+      "pass": true,
+      "reason": "converged"
+    },
+    {
+      "counts": [
+        200,
+        150,
+        130,
+        125,
+        131
+      ],
+      "pass": false,
+      "reason": "blocked"
+    },
+    {
+      "counts": [
+        200,
+        160,
+        155,
+        152
+      ],
+      "pass": false,
+      "reason": "blocked"
+    },
+    {
+      "counts": [
+        200,
+        150,
+        140,
+        125,
+        121
+      ],
+      "pass": false,
+      "reason": "blocked"
+    },
+    {
+      "counts": [
+        200,
+        0,
+        0
+      ],
+      "pass": true,
+      "reason": "target"
+    },
+    {
+      "counts": [
+        100,
+        0,
+        70
+      ],
+      "pass": false,
+      "reason": "blocked"
+    }
+  ]
+}
