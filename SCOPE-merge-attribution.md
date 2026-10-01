@@ -1,4 +1,4 @@
-<!-- distilled: 850429f:SCOPE-merge-attribution.md 1312->709->606 (46.2%) pass=2 -->
+<!-- distilled: ca8217d:SCOPE-merge-attribution.md 818->384 (46.9%) pass=1 -->
 # Scope: who made a fall at a merge
 
 Status: proposed, revised. It follows PR #8 and replaces PR #9 and this scope's first rule.
