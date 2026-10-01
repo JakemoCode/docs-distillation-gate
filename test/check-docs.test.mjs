@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2184,4 +2184,131 @@ test("a stamp naming another file's draft is refused by name", async (t) => {
   const { ok, problem } = verifyStamp(r.dir, 'docs/x.md');
   assert.equal(ok, false);
   assert.match(problem, /names a file other than docs\/x\.md/);
+});
+
+// git quotes a path holding a double quote, a backslash, a tab, or a newline even
+// under core.quotePath=false, so a line-split listing never matches the name.
+test('the gate examines a document whose name holds a quote and a space', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/say "hi".md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/say "hi".md', lines(290, 'draft'));
+  r.commit('docs: a weak pass');
+
+  const run = runCli(r.dir, {}, ['--summary']);
+  assertNoCrash(run);
+  assert.match(run.stdout, /docs\/say "hi"\.md \(new\): 300 -> 290/);
+  assert.equal(run.code, 1);
+});
+
+test('a branch rename away from a quoted name keeps the document an edit', async (t) => {
+  const r = repo(t);
+  r.write('docs/say "hi".md', lines(50, 'trunk'));
+  r.commit('chore: init');
+  r.git('checkout', '-q', '-b', 'feat');
+  r.git('mv', 'docs/say "hi".md', 'docs/x.md');
+  r.write('docs/x.md', `${lines(50, 'trunk')}\n${lines(20, 'branch')}`);
+  r.commit('docs: rename and add');
+
+  const { kind, points } = measureCurve(r.dir, 'docs/x.md');
+  assert.deepEqual([kind, points.map((point) => point.count)], ['edit', [20]]);
+});
+
+// git reads `<rev>:<path>` at the first colon, so the stamp must too.
+test('the stamp the gate prints for a name with a colon proves itself', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/a:b.md', lines(100, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/a:b.md', lines(40, 'draft'));
+  r.commit('docs: distil');
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
+  r.write('docs/a:b.md', `${printed}\n${lines(40, 'draft')}`);
+  r.commit('docs: stamp it');
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/a:b.md'), { ok: true, problem: null });
+  assert.equal(runCli(r.dir).code, 0);
+});
+
+test('an override names a gated document whose name holds a space', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/a b.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/a b.md', lines(290, 'draft'));
+  r.commit('docs: a weak pass\n\nDoc-distill-override: docs/a b.md the table cannot shrink');
+
+  const run = runCli(r.dir);
+  assert.equal(run.code, 0, run.stdout);
+});
+
+// A stamp is text in a pull request. Its revision must never reach git as an option.
+test('a stamp whose revision looks like an option is refused before git reads it', async (t) => {
+  const r = distilledBranch(t);
+  stampWith(r, '<!-- distilled: --output=written-by-stamp 100->40 (40.0%) pass=1 -->');
+
+  const { ok, problem } = verifyStamp(r.dir, 'docs/x.md');
+  assert.deepEqual([ok, problem], [false, '--output=written-by-stamp is not <commit>:<path>']);
+  assert.equal(existsSync(join(r.dir, 'written-by-stamp')), false);
+});
+
+// `git show :docs/x.md` reads the index, and an empty prefix matches every commit.
+test('a stamp with no commit part is refused', async (t) => {
+  const r = distilledBranch(t);
+  stampWith(r, '<!-- distilled: :docs/x.md 100->40 (40.0%) pass=1 -->');
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: ':docs/x.md is not <commit>:<path>' });
+});
+
+// A folded trailer carries its value on the next line, which is not this one.
+test('a bare override trailer is not an override', () => {
+  const bare = ['Doc-distill-override:', 'Doc-distill-override:   ', 'Doc-distill-override:\r'];
+  const commits = bare.map((message) => ({ sha: 'abc', author: 'Ada', message }));
+  assert.deepEqual(parseOverrides(commits, new Set(['docs/x.md'])), []);
+});
+
+// A SHA-256 id runs to 64 characters, so git, not a length, decides.
+test('a stamp naming a 64-character commit reaches git', async (t) => {
+  const r = distilledBranch(t);
+  stampWith(r, `<!-- distilled: ${'a'.repeat(64)}:docs/x.md 100->40 (40.0%) pass=1 -->`);
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: `${'a'.repeat(64)}:docs/x.md does not resolve` });
+});
+
+test('a stamp whose commit is written in capitals proves itself', async (t) => {
+  const r = distilledBranch(t);
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
+  // The full id, so the capitals are certain to change it: a short one can be all digits.
+  const capitals = printed.replace(/distilled: ([0-9a-f]+):/, (_, sha) => `distilled: ${r.git('rev-parse', sha).toUpperCase()}:`);
+  assert.match(capitals, /distilled: [0-9A-F]*[A-F][0-9A-F]*:/);
+  stampWith(r, capitals);
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: true, problem: null });
+});
+
+test('an override takes the longest gated name its text starts with', () => {
+  const gated = new Set(['docs/a', 'docs/a b.md']);
+  const commits = [
+    { sha: 'abc', author: 'Ada', message: 'Doc-distill-override: docs/a b.md the table cannot shrink' },
+    { sha: 'def', author: 'Ada', message: 'Doc-distill-override: docs/a b.md' },
+  ];
+  assert.deepEqual(
+    parseOverrides(commits, gated).map(({ file, reason, problem }) => [file, reason, problem]),
+    [
+      ['docs/a b.md', 'the table cannot shrink', null],
+      ['docs/a b.md', '', 'the override carries no reason'],
+    ],
+  );
+});
+
+test('the stamp the gate prints for a name with a space proves itself', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/a b.md', lines(100, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/a b.md', lines(40, 'draft'));
+  r.commit('docs: distil');
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
+  r.write('docs/a b.md', `${printed}\n${lines(40, 'draft')}`);
+  r.commit('docs: stamp it');
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/a b.md'), { ok: true, problem: null });
+  assert.equal(runCli(r.dir).code, 0);
 });

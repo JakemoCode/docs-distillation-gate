@@ -84,7 +84,20 @@ export function verdict(counts) {
 }
 
 // Doc-distill-override: docs/wire-protocol.md would delete the wire format table
-const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(\S+)\s*(.*)$/;
+// A bare trailer is not one: a folded trailer carries its value on the next line.
+const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(\S.*)$/;
+
+/**
+ * The file a trailer names, and its reason. A gated name may hold a space, so
+ * the longest gated file the text starts with, ending at a space, names it;
+ * otherwise the first word does, so the problem reported names what the author
+ * wrote.
+ */
+function overrideTarget(text, gatedFiles) {
+  const ends = [text.length, ...[...text.matchAll(/\s/g)].map((space) => space.index).reverse()];
+  const file = ends.map((end) => text.slice(0, end)).find((prefix) => gatedFiles.has(prefix)) ?? text.split(/\s/)[0];
+  return { file, reason: text.slice(file.length).trim() };
+}
 
 /**
  * Read every override trailer from the commits of a branch.
@@ -101,8 +114,7 @@ export function parseOverrides(commits, gatedFiles) {
       const found = OVERRIDE_TRAILER.exec(line.trim());
       if (found === null) continue;
 
-      const file = found[1];
-      const reason = found[2].trim();
+      const { file, reason } = overrideTarget(found[1], gatedFiles);
 
       let problem = null;
       if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
@@ -119,9 +131,10 @@ export function parseOverrides(commits, gatedFiles) {
 //
 // The leading field is a git revision, not a bare hash. `git show` it and the
 // draft comes back under the name it was drafted with, which is the one name a
-// rename cannot invalidate.
+// rename cannot invalidate. The revision runs to the curve, so a name with a
+// space in it still reads whole.
 const STAMP_PATTERN =
-  /^<!--\s*distilled:\s*(\S+)\s+([\d>-]+)\s+\(([\d.]+)%\)\s*(converged\s+)?pass=(\d+)\s*-->$/;
+  /^<!--\s*distilled:\s*(\S.*?)\s+([\d>-]+)\s+\(([\d.]+)%\)\s*(converged\s+)?pass=(\d+)\s*-->$/;
 
 /**
  * Write the stamp for a measured curve.
@@ -312,12 +325,12 @@ function blobIdsAt(repoDir, rev, paths) {
   // listing stops the gate, because an absent document would steer the walk.
   let listing;
   try {
-    listing = git(repoDir, 'ls-tree', '--full-tree', rev, '--', ...paths);
+    listing = git(repoDir, 'ls-tree', '-z', '--full-tree', rev, '--', ...paths);
   } catch (error) {
     throw new Error(`docs-distill cannot read ${rev}. ${String(error.stderr ?? error.message).trim()}`);
   }
-  for (const line of listing.split('\n')) {
-    const entry = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line);
+  for (const line of listing.split('\0')) {
+    const entry = /^\d+ blob ([0-9a-f]+)\t(.+)$/s.exec(line);
     if (entry !== null) ids.set(entry[2], entry[1]);
   }
   return ids;
@@ -351,16 +364,36 @@ let diffMergesSupported = true;
  * correct, so it is rethrown.
  */
 function nameStatus(repoDir, sha) {
-  const base = ['show', RENAME_THRESHOLD, '--name-status', '--format='];
-  if (!diffMergesSupported) return git(repoDir, ...base, sha);
+  const show = (...flags) => git(repoDir, 'show', RENAME_THRESHOLD, '--name-status', '-z', '--format=', ...flags, sha);
+  if (!diffMergesSupported) return nameStatusEntries(show());
 
+  let output;
   try {
-    return git(repoDir, ...base, '--diff-merges=first-parent', sha);
+    output = show('--diff-merges=first-parent');
   } catch (error) {
     if (!/diff-merges/.test(String(error.stderr ?? ''))) throw error;
     diffMergesSupported = false;
-    return git(repoDir, ...base, sha);
+    output = show();
   }
+  return nameStatusEntries(output);
+}
+
+/**
+ * `--name-status -z` output as a status and its paths, source then destination
+ * for a rename or copy. git quotes a path holding a double quote, a backslash,
+ * a tab, or a newline in line output even under core.quotePath=false; -z never
+ * quotes, so the name read is the name on disk.
+ */
+function nameStatusEntries(output) {
+  const fields = output.split('\0');
+  const entries = [];
+  for (let i = 0; i < fields.length - 1; ) {
+    const status = fields[i];
+    const count = /^[RC]/.test(status) ? 2 : 1;
+    entries.push({ status, paths: fields.slice(i + 1, i + 1 + count) });
+    i += 1 + count;
+  }
+  return entries;
 }
 
 /**
@@ -387,11 +420,8 @@ function nameHistory(repoDir, path, commits) {
     // it. That view also reports the renames the merge carried in from the
     // trunk, which is why the name this walk lands on is a candidate rather
     // than an answer: `measureCurve` settles it against the merge base.
-    const status = nameStatus(repoDir, sha);
-
-    for (const line of status.split('\n')) {
-      const renamed = /^R\d*\t(.+)\t(.+)$/.exec(line);
-      if (renamed !== null && renamed[2] === name) name = renamed[1];
+    for (const { status, paths } of nameStatus(repoDir, sha)) {
+      if (status.startsWith('R') && paths[1] === name) name = paths[0];
     }
 
     return at;
@@ -674,6 +704,17 @@ function baselineOf(repoDir, path, points) {
 }
 
 /**
+ * A stamp's revision as the commit and name baselineOf writes for a measured
+ * curve, or null for any other shape. git reads `<rev>:<path>` at the first
+ * colon, and a name may hold more. The commit has no upper length, since git
+ * decides whether it resolves, and SHA-256 ids run past 40 characters.
+ */
+function stampRevParts(rev) {
+  const found = /^([0-9a-f]{4,}):(.+)$/i.exec(rev);
+  return found === null ? null : { sha: found[1].toLowerCase(), name: found[2] };
+}
+
+/**
  * Prove a document's stamp against git.
  *
  * The marking side records a baseline. This is the checking side: it resolves
@@ -690,15 +731,21 @@ export function verifyStamp(repoDir, path, branch = branchOf(repoDir), measured 
 
   // The field is a command, not a label: git show it and the draft comes back,
   // under the name it was drafted with. That is the one name a rename cannot
-  // invalidate.
+  // invalidate. The stamp is text a pull request wrote, so only the shape
+  // stampRevParts accepts reaches git: an abbreviated commit, a colon, a name.
+  // That keeps an option such as `--output=` away from git, and an empty commit
+  // part, which git reads as the index, from matching every commit.
+  const parts = stampRevParts(stamp.rev);
+  if (parts === null) return { ok: false, problem: `${stamp.rev} is not <commit>:<path>` };
+  const { sha: draftSha, name: draftName } = parts;
+  // cat-file -e only asks that the revision resolves; the curve decides the rest.
   try {
-    git(repoDir, 'show', stamp.rev);
+    git(repoDir, 'cat-file', '-e', stamp.rev);
   } catch {
     return { ok: false, problem: `${stamp.rev} does not resolve` };
   }
 
   const { points, reached } = measured ?? measureCurve(repoDir, path, branch);
-  const [draftSha, draftName] = stamp.rev.split(':');
   const drafted = points.find((point) => point.sha.startsWith(draftSha) && point.name === draftName);
   const commits = branch.commits.filter((sha) => sha.startsWith(draftSha));
   if (drafted === undefined && commits.some((sha) => reached.has(sha))) {
@@ -761,15 +808,13 @@ export function isGated(path) {
 
 /** The gated documents this branch added, changed or renamed. */
 function changedGatedFiles(repoDir, mergeBase) {
-  const status = git(repoDir, 'diff', RENAME_THRESHOLD, '--name-status', mergeBase, 'HEAD');
+  const status = git(repoDir, 'diff', RENAME_THRESHOLD, '--name-status', '-z', mergeBase, 'HEAD');
   const paths = [];
 
-  for (const line of status.split('\n')) {
-    const fields = line.split('\t');
-    if (fields.length < 2) continue;
-    if (fields[0].startsWith('D')) continue;
+  for (const { status: kind, paths: named } of nameStatusEntries(status)) {
+    if (kind.startsWith('D')) continue;
 
-    const destination = fields[fields.length - 1]; // a rename carries source then destination
+    const destination = named[named.length - 1]; // a rename carries source then destination
     if (isGated(destination)) paths.push(destination);
   }
 
@@ -778,7 +823,7 @@ function changedGatedFiles(repoDir, mergeBase) {
 
 /** Every gated document on the branch, for validating an override's target. */
 function gatedFilesAtHead(repoDir) {
-  return new Set(git(repoDir, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n').filter(isGated));
+  return new Set(git(repoDir, 'ls-tree', '-r', '-z', '--name-only', 'HEAD').split('\0').filter(isGated));
 }
 
 function commitsOf(repoDir, mergeBase) {
