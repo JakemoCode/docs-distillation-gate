@@ -84,8 +84,33 @@ export function verdict(counts) {
 }
 
 // Doc-distill-override: docs/wire-protocol.md would delete the wire format table
-// A bare trailer is not one: a folded trailer carries its value on the next line.
-const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(\S.*)$/;
+//
+// git reads it from the trailer block, the message's last paragraph, and
+// unfolds it, so a value folded onto the next line counts and the same line
+// in the subject or an earlier paragraph does not. git matches the key in any
+// case. Which lines it calls trailers also follows the reader's trailer.*
+// config, so CI, reading with none, is what decides. The key= and valueonly
+// options arrived in git 2.22; an older git prints the placeholder as text,
+// which no value can equal, since every value ends in a newline.
+const TRAILERS = '%(trailers:key=Doc-distill-override,valueonly,unfold)';
+const OVERRIDE_FORMAT = `%h%x00%an%x00${TRAILERS}%x1e`;
+
+/** Each commit in `range` with the values of its override trailers. */
+export function overrideCommits(repoDir, range) {
+  return git(repoDir, 'log', '--no-show-signature', `--format=${OVERRIDE_FORMAT}`, range)
+    .split('\u001e')
+    .filter((record) => record.trim() !== '')
+    .map((record) => {
+      const [sha, author, listed] = record.replace(/^\n/, '').split('\u0000');
+      if (listed === TRAILERS) {
+        throw new Error('docs-distill reads override trailers with %(trailers:key=...,valueonly), which needs git 2.22 or later.');
+      }
+      // valueonly ends each value with a newline, and a trailer with no value
+      // is an empty line, which stays so it can be reported.
+      const values = listed === '' ? [] : listed.replace(/\n$/, '').split('\n');
+      return { sha, author, values };
+    });
+}
 
 /**
  * The file a trailer names, and its reason. A gated name may hold a space, so
@@ -100,7 +125,8 @@ function overrideTarget(text, gatedFiles) {
 }
 
 /**
- * Read every override trailer from the commits of a branch.
+ * Read every override from the commits of a branch, each `{ sha, author,
+ * values }` as overrideCommits returns them.
  *
  * The trailer must name a gated file and carry a reason. Nothing here can
  * verify that the reason is true, so the control is attribution: each override
@@ -109,15 +135,13 @@ function overrideTarget(text, gatedFiles) {
 export function parseOverrides(commits, gatedFiles) {
   const overrides = [];
 
-  for (const { sha, author, message } of commits) {
-    for (const line of message.split('\n')) {
-      const found = OVERRIDE_TRAILER.exec(line.trim());
-      if (found === null) continue;
-
-      const { file, reason } = overrideTarget(found[1], gatedFiles);
+  for (const { sha, author, values } of commits) {
+    for (const value of values) {
+      const { file, reason } = overrideTarget(value.trim(), gatedFiles);
 
       let problem = null;
-      if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
+      if (file === '') problem = 'the override names no file';
+      else if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
       else if (reason === '') problem = 'the override carries no reason';
 
       overrides.push({ sha, author, file, reason, valid: problem === null, problem });
@@ -132,9 +156,11 @@ export function parseOverrides(commits, gatedFiles) {
 // The leading field is a git revision, not a bare hash. `git show` it and the
 // draft comes back under the name it was drafted with, which is the one name a
 // rename cannot invalidate. The revision runs to the curve, so a name with a
-// space in it still reads whole.
-const STAMP_PATTERN =
-  /^<!--\s*distilled:\s*(\S.*?)\s+([\d>-]+)\s+\(([\d.]+)%\)\s*(converged\s+)?pass=(\d+)\s*-->$/;
+// space in it still reads whole. The revision is what lies between the head
+// and the tail, matched apart: one pattern holding all three backtracks once
+// per space in a long run, which makes a line of spaces a slow gate.
+const STAMP_HEAD = /^<!--\s*distilled:\s*/;
+const STAMP_TAIL = /\s([\d>-]+)\s+\(([\d.]+)%\)\s*(converged\s+)?pass=(\d+)\s*-->$/;
 
 /**
  * Write the stamp for a measured curve.
@@ -162,10 +188,16 @@ export function readStamp(text) {
   const first = text.split('\n').find((line) => line.trim() !== '');
   if (first === undefined) return null;
 
-  const found = STAMP_PATTERN.exec(first.trim());
-  if (found === null) return null;
+  const line = first.trim();
+  const head = STAMP_HEAD.exec(line);
+  if (head === null) return null;
+  const rest = line.slice(head[0].length);
+  const tail = STAMP_TAIL.exec(rest);
+  if (tail === null) return null;
+  const rev = rest.slice(0, tail.index).trimEnd();
+  if (rev === '') return null;
 
-  const [, rev, curve, percent, converged, pass] = found;
+  const [, curve, percent, converged, pass] = tail;
   return {
     rev,
     counts: curve.split('->').map(Number),
@@ -826,20 +858,6 @@ function gatedFilesAtHead(repoDir) {
   return new Set(git(repoDir, 'ls-tree', '-r', '-z', '--name-only', 'HEAD').split('\0').filter(isGated));
 }
 
-function commitsOf(repoDir, mergeBase) {
-  const RECORD = '\u001e';
-  const FIELD = '\u0000';
-  const raw = git(repoDir, 'log', '--format=%h%x00%an%x00%B%x1e', `${mergeBase}..HEAD`);
-
-  return raw
-    .split(RECORD)
-    .filter((record) => record.trim() !== '')
-    .map((record) => {
-      const [sha, author, message] = record.replace(/^\n/, '').split(FIELD);
-      return { sha, author, message };
-    });
-}
-
 const PIPELINE = `Then, in this order:
 
   1. Convert to ASD-STE100 Simplified Technical English. Grammar only.
@@ -887,7 +905,7 @@ function main() {
   const mergeBase = branch.mergeBase;
   const changed = changedGatedFiles(repoDir, mergeBase);
 
-  const overrides = parseOverrides(commitsOf(repoDir, mergeBase), gatedFilesAtHead(repoDir));
+  const overrides = parseOverrides(overrideCommits(repoDir, `${mergeBase}..HEAD`), gatedFilesAtHead(repoDir));
   const overridden = new Set(overrides.filter((o) => o.valid).map((o) => o.file));
 
   const blocks = [];
@@ -1011,7 +1029,6 @@ function main() {
     out.push(`Override in ${override.sha} by ${override.author} is not usable: ${override.problem}.`);
     failed = true;
   }
-
   // A refusal to measure is a block, so an override answering one is reported
   // as clearing a block rather than as having run ahead of any. That holds for
   // a refusal the override could not clear too: the line above has already

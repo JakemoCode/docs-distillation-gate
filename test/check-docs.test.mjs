@@ -21,6 +21,7 @@ const {
   hiddenWords,
   isGated,
   measureCurve,
+  overrideCommits,
   parseOverrides,
   proseWords,
   readStamp,
@@ -99,6 +100,22 @@ test('readStamp parses every field of a stamp', () => {
     converged: true,
     pass: 4,
   });
+});
+
+test('readStamp reads a revision with spaces, whatever spacing precedes the curve', () => {
+  const stamp = readStamp('<!-- distilled: a1b2c3d:docs/a b.md   100->40 (40.0%) pass=1 -->');
+  assert.equal(stamp.rev, 'a1b2c3d:docs/a b.md');
+  assert.equal(readStamp('<!-- distilled: 100->40 (40.0%) pass=1 -->'), null);
+});
+
+// A document's author writes its first line. A long run of spaces in it must
+// not turn the gate's parse into a backtrack per space.
+test('readStamp reads a first line with a long run of spaces in linear time', () => {
+  const line = `<!-- distilled: x${' '.repeat(100_000)}y -->`;
+  const started = performance.now();
+  assert.equal(readStamp(line), null);
+  // The old pattern took 5.5s here; this one takes about 1ms. The margin is for slow runners.
+  assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)}ms`);
 });
 
 test('readStamp reports an unstamped document as null', () => {
@@ -182,11 +199,12 @@ test('verdict still gates an edit at the floor boundary', () => {
 
 const GATED = new Set(['docs/wire-protocol.md', 'AGENTS.md']);
 
-const commit = (message, author = 'Ada') => ({ sha: 'a1b2c3d', author, message });
+// Each commit carries the values of its override trailers, as overrideCommits reads them.
+const commit = (values, author = 'Ada') => ({ sha: 'a1b2c3d', author, values });
 
 test('parseOverrides reads the file, the reason and the author', () => {
   const commits = [
-    commit('docs: cut the protocol page\n\nDoc-distill-override: docs/wire-protocol.md would delete the wire format table'),
+    commit(['docs/wire-protocol.md would delete the wire format table']),
   ];
 
   assert.deepEqual(parseOverrides(commits, GATED), [
@@ -202,11 +220,11 @@ test('parseOverrides reads the file, the reason and the author', () => {
 });
 
 test('parseOverrides finds nothing in commits that carry no trailer', () => {
-  assert.deepEqual(parseOverrides([commit('docs: ordinary edit')], GATED), []);
+  assert.deepEqual(parseOverrides([commit([])], GATED), []);
 });
 
 test('parseOverrides rejects a trailer naming a file the gate never examines', () => {
-  const commits = [commit('Doc-distill-override: notes/vault/note.md too long')];
+  const commits = [commit(['notes/vault/note.md too long'])];
   const [override] = parseOverrides(commits, GATED);
 
   assert.equal(override.valid, false);
@@ -214,7 +232,7 @@ test('parseOverrides rejects a trailer naming a file the gate never examines', (
 });
 
 test('parseOverrides rejects a trailer with no reason', () => {
-  const [override] = parseOverrides([commit('Doc-distill-override: AGENTS.md')], GATED);
+  const [override] = parseOverrides([commit(['AGENTS.md'])], GATED);
 
   assert.equal(override.valid, false);
   assert.match(override.problem, /no reason/);
@@ -222,8 +240,8 @@ test('parseOverrides rejects a trailer with no reason', () => {
 
 test('parseOverrides attributes each override to its own commit author', () => {
   const commits = [
-    commit('Doc-distill-override: AGENTS.md keeps the rule list', 'Grace'),
-    commit('Doc-distill-override: docs/wire-protocol.md keeps the table', 'Ada'),
+    commit(['AGENTS.md keeps the rule list'], 'Grace'),
+    commit(['docs/wire-protocol.md keeps the table'], 'Ada'),
   ];
 
   assert.deepEqual(
@@ -826,6 +844,62 @@ test('the gate measures against the remote trunk, not a stale local branch', asy
   assert.equal(run.code, 0);
 });
 
+// Overrides are read from the trailer block git parses, unfolded (issue #13).
+test('a folded override trailer clears a block', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: keep the table\n\nDoc-distill-override:\n  docs/new.md would delete the wire format table');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 0, run.stdout);
+  assert.match(run.stdout, /Override: docs\/new\.md, cleared by Tester/);
+});
+
+test('an override line in the body, outside the trailer block, is not an override', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: note how to skip\n\nDoc-distill-override: docs/new.md is the line the README shows.\n\nThe gate reads trailers, not prose.');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1);
+  assert.doesNotMatch(run.stdout, /Override: docs\/new\.md/);
+});
+
+test('overrideCommits reads every trailer value, empty ones included, in any key case', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: two waivers\n\nDoc-distill-override:\nSigned-off-by: Ada <ada@example.com>\ndoc-distill-override: docs/new.md two\nDOC-DISTILL-OVERRIDE: docs/other.md three');
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: nothing to waive');
+
+  const values = overrideCommits(r.dir, 'main..HEAD').map((commit) => commit.values);
+
+  assert.deepEqual(values, [[], ['', 'docs/new.md two', 'docs/other.md three'], []]);
+});
+
+// The old-git check looks at what the placeholder printed, never at the message.
+test('a message that mentions the %(trailers) placeholder is read as a message', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: read %(trailers:key=X) from git\n\nNo override here.');
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: waive it\n\nDoc-distill-override: %(trailers) docs are fine');
+
+  assert.deepEqual(overrideCommits(r.dir, 'main..HEAD').map((commit) => commit.values), [['%(trailers) docs are fine'], [], []]);
+});
+
+test('an override trailer with no value is reported as naming no file', async (t) => {
+  const r = branchThatPasses(t);
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: waive it\n\nDoc-distill-override:');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1);
+  assert.match(run.stdout, /the override names no file/);
+});
+
 test('an override after a real block clears it, and is reported in one quiet line', async (t) => {
   const r = branchWithBlock(t);
   r.git('commit', '-q', '--allow-empty', '-m',
@@ -898,7 +972,7 @@ test('the loud count is annotated on the check only inside Actions', async (t) =
 test('an override naming a file the gate never examines fails the check', async (t) => {
   const r = branchThatPasses(t);
   r.git('commit', '-q', '--allow-empty', '-m',
-    'Doc-distill-override: notes/vault/a.md too long');
+    'docs: waive it\n\nDoc-distill-override: notes/vault/a.md too long');
 
   const run = runCli(r.dir);
 
@@ -2258,13 +2332,6 @@ test('a stamp with no commit part is refused', async (t) => {
   assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: ':docs/x.md is not <commit>:<path>' });
 });
 
-// A folded trailer carries its value on the next line, which is not this one.
-test('a bare override trailer is not an override', () => {
-  const bare = ['Doc-distill-override:', 'Doc-distill-override:   ', 'Doc-distill-override:\r'];
-  const commits = bare.map((message) => ({ sha: 'abc', author: 'Ada', message }));
-  assert.deepEqual(parseOverrides(commits, new Set(['docs/x.md'])), []);
-});
-
 // A SHA-256 id runs to 64 characters, so git, not a length, decides.
 test('a stamp naming a 64-character commit reaches git', async (t) => {
   const r = distilledBranch(t);
@@ -2287,8 +2354,8 @@ test('a stamp whose commit is written in capitals proves itself', async (t) => {
 test('an override takes the longest gated name its text starts with', () => {
   const gated = new Set(['docs/a', 'docs/a b.md']);
   const commits = [
-    { sha: 'abc', author: 'Ada', message: 'Doc-distill-override: docs/a b.md the table cannot shrink' },
-    { sha: 'def', author: 'Ada', message: 'Doc-distill-override: docs/a b.md' },
+    { sha: 'abc', author: 'Ada', values: ['docs/a b.md the table cannot shrink'] },
+    { sha: 'def', author: 'Ada', values: ['docs/a b.md'] },
   ];
   assert.deepEqual(
     parseOverrides(commits, gated).map(({ file, reason, problem }) => [file, reason, problem]),
