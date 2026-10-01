@@ -84,18 +84,17 @@ export function verdict(counts) {
 }
 
 // Doc-distill-override: docs/wire-protocol.md would delete the wire format table
-const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(.*)$/;
+const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(\S.*)$/;
 
 /**
  * The file a trailer names, and its reason. A gated name may hold a space, so
- * the longest gated file the text starts with names it; otherwise the first
- * word does, so the problem the gate reports names what the author wrote.
+ * the longest gated file the text starts with, ending at a space, names it;
+ * otherwise the first word does, so the problem reported names what the author
+ * wrote.
  */
 function overrideTarget(text, gatedFiles) {
-  const file =
-    [...gatedFiles]
-      .filter((gated) => text === gated || (text.startsWith(gated) && /^\s/.test(text.slice(gated.length))))
-      .sort((a, b) => b.length - a.length)[0] ?? text.split(/\s/)[0];
+  const ends = [text.length, ...[...text.matchAll(/\s/g)].map((space) => space.index).reverse()];
+  const file = ends.map((end) => text.slice(0, end)).find((prefix) => gatedFiles.has(prefix)) ?? text.split(/\s/)[0];
   return { file, reason: text.slice(file.length).trim() };
 }
 
@@ -726,17 +725,21 @@ export function verifyStamp(repoDir, path, branch = branchOf(repoDir), measured 
 
   // The field is a command, not a label: git show it and the draft comes back,
   // under the name it was drafted with. That is the one name a rename cannot
-  // invalidate. The stamp is text a pull request wrote, so a revision that
-  // git would read as an option never reaches it; no revision starts with `-`.
+  // invalidate. The stamp is text a pull request wrote, so only the shape
+  // baselineOf writes reaches git: an abbreviated commit, a colon, a name. That
+  // keeps an option such as `--output=` away from git show, and an empty commit
+  // part, which git reads as the index, from matching every commit.
+  const { sha: draftSha, name: draftName } = stampRevParts(stamp.rev);
+  if (!/^[0-9a-f]{4,40}$/.test(draftSha) || !draftName) {
+    return { ok: false, problem: `${stamp.rev} is not <commit>:<path>` };
+  }
   try {
-    if (stamp.rev.startsWith('-')) throw new Error('an option, not a revision');
     git(repoDir, 'show', stamp.rev);
   } catch {
     return { ok: false, problem: `${stamp.rev} does not resolve` };
   }
 
   const { points, reached } = measured ?? measureCurve(repoDir, path, branch);
-  const { sha: draftSha, name: draftName } = stampRevParts(stamp.rev);
   const drafted = points.find((point) => point.sha.startsWith(draftSha) && point.name === draftName);
   const commits = branch.commits.filter((sha) => sha.startsWith(draftSha));
   if (drafted === undefined && commits.some((sha) => reached.has(sha))) {
