@@ -2185,3 +2185,60 @@ test("a stamp naming another file's draft is refused by name", async (t) => {
   assert.equal(ok, false);
   assert.match(problem, /names a file other than docs\/x\.md/);
 });
+
+// git quotes a path holding a double quote, a backslash, a tab, or a newline even
+// under core.quotePath=false, so a line-split listing never matches the name.
+test('the gate examines a document whose name holds a quote and a space', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/say "hi".md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/say "hi".md', lines(290, 'draft'));
+  r.commit('docs: a weak pass');
+
+  const run = runCli(r.dir, {}, ['--summary']);
+  assertNoCrash(run);
+  assert.match(run.stdout, /docs\/say "hi"\.md \(new\): 300 -> 290/);
+  assert.equal(run.code, 1);
+});
+
+test('a branch rename away from a quoted name keeps the document an edit', async (t) => {
+  const r = repo(t);
+  r.write('docs/say "hi".md', lines(50, 'trunk'));
+  r.commit('chore: init');
+  r.git('checkout', '-q', '-b', 'feat');
+  r.git('mv', 'docs/say "hi".md', 'docs/x.md');
+  r.write('docs/x.md', `${lines(50, 'trunk')}\n${lines(20, 'branch')}`);
+  r.commit('docs: rename and add');
+
+  const { kind, points } = measureCurve(r.dir, 'docs/x.md');
+  assert.deepEqual([kind, points.map((point) => point.count)], ['edit', [20]]);
+});
+
+// git reads `<rev>:<path>` at the first colon, so the stamp must too.
+test('the stamp the gate prints for a name with a colon proves itself', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/a:b.md', lines(100, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/a:b.md', lines(40, 'draft'));
+  r.commit('docs: distil');
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
+  r.write('docs/a:b.md', `${printed}\n${lines(40, 'draft')}`);
+  r.commit('docs: stamp it');
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/a:b.md'), { ok: true, problem: null });
+  assert.equal(runCli(r.dir).code, 0);
+});
+
+test('the stamp the gate prints for a name with a space proves itself', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/a b.md', lines(100, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/a b.md', lines(40, 'draft'));
+  r.commit('docs: distil');
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
+  r.write('docs/a b.md', `${printed}\n${lines(40, 'draft')}`);
+  r.commit('docs: stamp it');
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/a b.md'), { ok: true, problem: null });
+  assert.equal(runCli(r.dir).code, 0);
+});
