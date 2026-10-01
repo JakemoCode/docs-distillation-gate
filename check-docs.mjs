@@ -89,9 +89,11 @@ export function verdict(counts) {
 // unfolds it, so a value folded onto the next line counts and the same line
 // in the subject or an earlier paragraph does not. git matches the key in any
 // case. Which lines it calls trailers also follows the reader's trailer.*
-// config, so CI, reading with none, is what decides. %(trailers) arrived in
-// git 2.22; an older git prints the placeholder as text.
-const OVERRIDE_FORMAT = '%h%x00%an%x00%(trailers:key=Doc-distill-override,valueonly,unfold)%x1e';
+// config, so CI, reading with none, is what decides. The key= and valueonly
+// options arrived in git 2.22; an older git prints the placeholder as text,
+// which no value can equal, since every value ends in a newline.
+const TRAILERS = '%(trailers:key=Doc-distill-override,valueonly,unfold)';
+const OVERRIDE_FORMAT = `%h%x00%an%x00${TRAILERS}%x1e`;
 
 /** Each commit in `range` with the values of its override trailers. */
 export function overrideCommits(repoDir, range) {
@@ -100,8 +102,8 @@ export function overrideCommits(repoDir, range) {
     .filter((record) => record.trim() !== '')
     .map((record) => {
       const [sha, author, listed] = record.replace(/^\n/, '').split('\u0000');
-      if (listed.startsWith('%(trailers')) {
-        throw new Error('docs-distill reads override trailers with %(trailers), which needs git 2.22 or later.');
+      if (listed === TRAILERS) {
+        throw new Error('docs-distill reads override trailers with %(trailers:key=...,valueonly), which needs git 2.22 or later.');
       }
       // valueonly ends each value with a newline, and a trailer with no value
       // is an empty line, which stays so it can be reported.

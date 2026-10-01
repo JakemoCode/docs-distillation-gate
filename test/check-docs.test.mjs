@@ -115,7 +115,7 @@ test('readStamp reads a first line with a long run of spaces in linear time', ()
   const started = performance.now();
   assert.equal(readStamp(line), null);
   // The old pattern took 5.5s here; this one takes about 1ms. The margin is for slow runners.
-  assert.ok(performance.now() - started < 2000,`took ${Math.round(performance.now() - started)}ms`);
+  assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)}ms`);
 });
 
 test('readStamp reports an unstamped document as null', () => {
@@ -884,8 +884,9 @@ test('overrideCommits reads every trailer value, empty ones included, in any key
 test('a message that mentions the %(trailers) placeholder is read as a message', async (t) => {
   const r = branchWithBlock(t);
   r.git('commit', '-q', '--allow-empty', '-m', 'docs: read %(trailers:key=X) from git\n\nNo override here.');
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: waive it\n\nDoc-distill-override: %(trailers) docs are fine');
 
-  assert.deepEqual(overrideCommits(r.dir, 'main..HEAD').map((commit) => commit.values), [[], []]);
+  assert.deepEqual(overrideCommits(r.dir, 'main..HEAD').map((commit) => commit.values), [['%(trailers) docs are fine'], [], []]);
 });
 
 test('an override trailer with no value is reported as naming no file', async (t) => {
