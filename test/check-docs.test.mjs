@@ -2258,12 +2258,21 @@ test('a stamp with no commit part is refused', async (t) => {
   assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: ':docs/x.md is not <commit>:<path>' });
 });
 
-test('an override trailer naming no file is not an override', () => {
-  assert.deepEqual(parseOverrides([{ sha: 'abc', author: 'Ada', message: 'Doc-distill-override:' }], new Set(['docs/x.md'])), []);
+test('an override trailer naming no file is reported as naming none', () => {
+  const [override] = parseOverrides([{ sha: 'abc', author: 'Ada', message: 'Doc-distill-override:' }], new Set(['docs/x.md']));
+  assert.deepEqual([override.valid, override.problem], [false, 'the override names no file']);
+});
+
+// A SHA-256 repository abbreviates to as many as 64 characters.
+test('a stamp naming a 64-character commit reaches git', async (t) => {
+  const r = distilledBranch(t);
+  stampWith(r, `<!-- distilled: ${'a'.repeat(64)}:docs/x.md 100->40 (40.0%) pass=1 -->`);
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: `${'a'.repeat(64)}:docs/x.md does not resolve` });
 });
 
 test('an override takes the longest gated name its text starts with', () => {
-  const gated = new Set(['docs/a.md', 'docs/a b.md']);
+  const gated = new Set(['docs/a', 'docs/a b.md']);
   const commits = [
     { sha: 'abc', author: 'Ada', message: 'Doc-distill-override: docs/a b.md the table cannot shrink' },
     { sha: 'def', author: 'Ada', message: 'Doc-distill-override: docs/a b.md' },
