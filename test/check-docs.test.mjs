@@ -14,11 +14,13 @@ const home = process.cwd();
 const emptyDir = mkdtempSync(join(tmpdir(), 'docs-distill-cwd-'));
 process.chdir(emptyDir);
 const {
+  curveOf,
   formatStamp,
   fencesBalance,
   verifyStamp,
   hiddenWords,
   isGated,
+  measureCurve,
   parseOverrides,
   proseWords,
   readStamp,
@@ -450,6 +452,34 @@ test('resolveBaseline does not read a rename the trunk made as the branch renami
 
   assert.equal(result.kind, 'edit', 'the trunk renamed it, so the branch inherited it');
   assert.equal(result.baseline, 4, 'only the four words this branch added');
+});
+
+// A stacked branch carries its parent pull request's draft. The parent was
+// distilled and squash-merged, so the trunk holds the distilled page under a
+// commit the branch never had. Merging the trunk takes that version, and the
+// draft's cut lines leave with the merge: a fall the branch never made. The
+// branch's own 60 words after it were never distilled.
+test('a count that falls at a merge is not read as distillation', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.commit('chore: init');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: the parent draft');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(140, 'draft'));
+  r.commit('docs: the parent, distilled and squashed');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '-X', 'theirs', 'main');
+  r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(60, 'child')}`);
+  r.commit('docs: the child adds 60 words');
+
+  const curve = curveOf(measureCurve(r.dir, 'docs/x.md').points);
+  assert.deepEqual(curve, [60], 'the child is measured on its own words');
+  assert.equal(verdict(curve).pass, false, 'and 60 undistilled words are blocked');
 });
 
 test('resolveBaseline reports a file drafted on the branch as new', async (t) => {

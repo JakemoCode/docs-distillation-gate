@@ -414,8 +414,15 @@ export function mergeBaseOf(repoDir) {
 export function branchOf(repoDir) {
   const mergeBase = mergeBaseOf(repoDir);
   const revList = git(repoDir, 'rev-list', `${mergeBase}..HEAD`).trim();
+  const commits = revList === '' ? [] : revList.split('\n');
 
-  return { mergeBase, commits: revList === '' ? [] : revList.split('\n') };
+  return { mergeBase, commits, merges: mergesOf(repoDir, mergeBase, commits) };
+}
+
+/** The merge commits among the branch commits. */
+function mergesOf(repoDir, mergeBase, commits) {
+  if (commits.length === 0) return new Set();
+  return new Set(git(repoDir, 'rev-list', '--merges', `${mergeBase}..${commits[0]}`).split('\n').filter(Boolean));
 }
 
 /**
@@ -469,6 +476,19 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
 
     const { prose, hidden } = countWords(text, chargeable);
     points.push({ sha, name, count: prose, hidden, text });
+  }
+
+  // A count that falls at a merge commit fell because the merge took another
+  // branch's version of the document, as when the trunk holds a squash of a
+  // parent pull request this branch carried. The branch cut nothing, so the
+  // gate measures the document from the latest such merge on. Dropping the
+  // points before it can only lower the peak, which tightens the target.
+  const merges = branch.merges ?? mergesOf(repoDir, mergeBase, newestFirst);
+  for (let i = points.length - 1; i > 0; i -= 1) {
+    if (merges.has(points[i].sha) && points[i].count < points[i - 1].count) {
+      points.splice(0, i);
+      break;
+    }
   }
 
   return { kind, points, mergeBase, trunkName };
