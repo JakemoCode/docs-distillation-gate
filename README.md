@@ -133,8 +133,8 @@ that sounds concise. Measure it and you get one that is.
 
 ## How it works
 
-The gate walks every commit on the branch and counts the prose words in each
-gated document. Code blocks, inline code, HTML comments, and markdown syntax
+The gate walks the commits a document's text came from, through merges, and
+counts the prose words in each. Code blocks, inline code, HTML comments, and markdown syntax
 don't count. A word needs a letter, so a table of numbers is free, but words in
 table cells aren't.
 
@@ -169,6 +169,9 @@ same commits.
 
 The 65% ceiling came from a small sample, so treat early curves as
 calibration.
+
+A merge that mixes the trunk's copy with branch lines counts as the branch
+editing, so the earlier peak stays.
 
 ## Where it came from
 
