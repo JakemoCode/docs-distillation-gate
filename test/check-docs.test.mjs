@@ -826,6 +826,42 @@ test('the gate measures against the remote trunk, not a stale local branch', asy
   assert.equal(run.code, 0);
 });
 
+// Overrides are read from the trailer block git parses, unfolded (issue #13).
+test('a folded override trailer clears a block', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: keep the table\n\nDoc-distill-override:\n  docs/new.md would delete the wire format table');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 0, run.stdout);
+  assert.match(run.stdout, /Override: docs\/new\.md, cleared by Tester/);
+});
+
+test('an override line in the body, outside the trailer block, is not an override', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: note how to skip\n\nDoc-distill-override: docs/new.md is the line the README shows.\n\nThe gate reads trailers, not prose.');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1);
+  assert.doesNotMatch(run.stdout, /Override: docs\/new\.md/);
+});
+
+test('an override trailer with no value is reported as naming no file', async (t) => {
+  const r = branchThatPasses(t);
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: waive it\n\nDoc-distill-override:');
+
+  const run = runCli(r.dir);
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1);
+  assert.match(run.stdout, /the override names no file/);
+});
+
 test('an override after a real block clears it, and is reported in one quiet line', async (t) => {
   const r = branchWithBlock(t);
   r.git('commit', '-q', '--allow-empty', '-m',
