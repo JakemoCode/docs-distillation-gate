@@ -14,11 +14,13 @@ const home = process.cwd();
 const emptyDir = mkdtempSync(join(tmpdir(), 'docs-distill-cwd-'));
 process.chdir(emptyDir);
 const {
+  curveOf,
   formatStamp,
   fencesBalance,
   verifyStamp,
   hiddenWords,
   isGated,
+  measureCurve,
   parseOverrides,
   proseWords,
   readStamp,
@@ -450,6 +452,124 @@ test('resolveBaseline does not read a rename the trunk made as the branch renami
 
   assert.equal(result.kind, 'edit', 'the trunk renamed it, so the branch inherited it');
   assert.equal(result.baseline, 4, 'only the four words this branch added');
+});
+
+// A branch that pulls the trunk in moves the merge base forward. A commit made
+// before the pull still holds the trunk's old text, so measured against the
+// new base it reads the trunk's later rewrite, undone, as prose it added: the
+// branch is told to halve a paragraph someone else wrote, at a commit that
+// never touched the file. The gate bills a line only when it is new against
+// both the current base and the trunk commit it was built on.
+test('resolveBaseline bills a branch that merged the trunk only for its own prose', async (t) => {
+  const r = repo(t);
+  r.write('AGENTS.md', `# Doc\n\n${words(120)}`);
+  r.commit('docs: add the page');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+
+  r.git('checkout', '-q', 'main');
+  r.write('AGENTS.md', `# Doc\n\n${words(120).replaceAll('word', 'term')}`);
+  r.commit('docs: rewrite the paragraph on the trunk');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'main');
+  r.write('AGENTS.md', `# Doc\n\n${words(120).replaceAll('word', 'term')}\n\n${words(12)}`);
+  r.commit('docs: add a line');
+
+  const result = resolveBaseline(r.dir, 'AGENTS.md');
+
+  assert.equal(result.kind, 'edit');
+  assert.equal(result.baseline, 12, 'only the twelve words this branch added');
+  assert.deepEqual(curveOf(measureCurve(r.dir, 'AGENTS.md').points), [12]);
+});
+
+// A stacked branch: its parent pull request drafted the page and was squash
+// merged, so the trunk holds the page under a commit the branch never had. The
+// branch pulls the trunk in and adds 60 words. Billed against its old base the
+// draft commit costs 300, the merge drops it to 0, and the fall reads as a
+// distillation the branch never did.
+test('resolveBaseline does not read a squash-merged parent as distilled', async (t) => {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.commit('chore: init');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/x.md', words(300));
+  r.commit('docs: draft the page');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', words(300));
+  r.commit('docs: draft the page (squashed)');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'main');
+  r.write('docs/x.md', `${words(300)}\n${words(60).replaceAll('word', 'more')}`);
+  r.commit('docs: extend the page');
+
+  assert.deepEqual(curveOf(measureCurve(r.dir, 'docs/x.md').points), [60]);
+});
+
+// Each setting hides the hunk headers from a parser of plain headers: escape
+// codes around them, a driver or textconv that prints something else, or an
+// attribute that makes git call the file binary. An edit then bills nothing.
+for (const [setting, apply] of [
+  ['forced colour', (r) => r.git('config', 'color.diff', 'always')],
+  ['an external diff driver', (r) => r.git('config', 'diff.external', 'true')],
+  ['a textconv', (r) => {
+    r.git('config', 'diff.blank.textconv', 'true');
+    r.write('.gitattributes', '*.md diff=blank');
+  }],
+  ['a -diff attribute', (r) => r.write('.gitattributes', '*.md -diff')],
+]) {
+  test(`resolveBaseline bills an edit under ${setting}`, async (t) => {
+    const r = repo(t);
+    apply(r);
+    r.write('docs/x.md', words(100));
+    r.commit('docs: add the page');
+
+    r.git('checkout', '-q', '-b', 'feat');
+    r.write('docs/x.md', `${words(100)}\n${words(40)}`);
+    r.commit('docs: extend the page');
+
+    assert.equal(resolveBaseline(r.dir, 'docs/x.md').baseline, 40);
+  });
+}
+
+// Inter-hunk context fuses two nearby hunks into one, and the fused range
+// covers the unchanged trunk lines between them.
+test('resolveBaseline bills only changed lines under inter-hunk context', async (t) => {
+  const r = repo(t);
+  r.git('config', 'diff.interHunkContext', '3');
+  r.write('docs/x.md', lines(20));
+  r.commit('docs: add the page');
+
+  r.git('checkout', '-q', '-b', 'feat');
+  r.write('docs/x.md', lines(20).replace('word9\n', 'mine9\n').replace('word12\n', 'mine12\n'));
+  r.commit('docs: change two lines');
+
+  assert.equal(resolveBaseline(r.dir, 'docs/x.md').baseline, 2);
+});
+
+// A subtree import merges in history that shares no commit with the trunk.
+test('resolveBaseline measures a branch that merged an unrelated history', async (t) => {
+  const r = repo(t);
+  r.write('docs/x.md', words(100));
+  r.commit('docs: add the page');
+
+  r.git('checkout', '-q', '--orphan', 'vendored');
+  r.git('rm', '-q', '-r', '--cached', '.');
+  r.git('clean', '-q', '-fd');
+  r.write('lib/readme.txt', 'vendored');
+  r.commit('chore: another project');
+
+  r.git('checkout', '-q', '-b', 'feat', 'main');
+  r.git('merge', '-q', '--no-edit', '--allow-unrelated-histories', 'vendored');
+  r.write('docs/x.md', `${words(100)}\n${words(40).replaceAll('word', 'more')}`);
+  r.commit('docs: extend the page');
+
+  assert.equal(resolveBaseline(r.dir, 'docs/x.md').baseline, 40);
 });
 
 test('resolveBaseline reports a file drafted on the branch as new', async (t) => {
