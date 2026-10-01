@@ -1,7 +1,7 @@
 <!-- distilled: 850429f:SCOPE-merge-attribution.md 1312->709->606 (46.2%) pass=2 -->
 # Scope: who made a fall at a merge
 
-Status: proposed. It follows PR #8 and replaces PR #9.
+Status: proposed, revised. It follows PR #8 and replaces PR #9 and the restart rule this scope first proposed.
 
 ## Problem
 
@@ -22,18 +22,26 @@ PR #9 removed all points before a fall at a merge. Review found four errors: sha
 
 A line rule also fails: "a line that leaves at a merge is a cut of the branch only when the first parent had it and the other parent did not." In the example, the 160 words are exactly such lines. A line does not show which resolver choice removed it.
 
+The first version of this scope restarted the curve at a merge that took a trunk parent's copy. Two review rounds found that every point still came from all of `mergeBase..HEAD` in date order. A side commit dated after the restart brought the old draft back, a side branch's own trunk merge caused a restart, and an ancestry filter added to fix that dropped real drafting done on a side branch that the branch kept.
+
+Measuring only the first-parent chain fails as well. The installed workflow checks out the merge ref, whose first parent is the trunk, so every pull request becomes one point and blocks. A `git pull` that merges a collaborator's commits drops their draft and stamp, and passes on a side branch the branch keeps fold into one step.
+
 ## Rule
 
-At a merge commit, the gate measures a document from that merge on when both conditions are true:
+The curve follows the prose that the document at HEAD holds, back through the commits that produced it.
 
-- The document at the merge is byte-identical to the document at a trunk parent. A trunk parent is a parent other than the first parent that is an ancestor of the merge base.
-- The document at the merge is different from the document at the first parent.
+Walk back from HEAD through the commit graph. At each merge, compare the document at the merge with the document at each parent:
 
-The earlier points then measure prose the document does not contain. The latest such merge applies.
+- When the merge's copy is byte-identical to the copy at one or more parents, the merge took the document from them. Follow only those parents.
+- When the merge's copy equals no parent's copy, the merge edited the document. Follow every parent.
 
-A side branch never causes a restart, so it cannot hide a fenced draft from the stamp check (shape 6).
+The document is looked up under every name it has had. A merge that does not hold the document took that absence from a parent that does not hold it, but only when the document existed where that parent and the first parent last met. Otherwise a branch that deletes its own draft at a merge would lose its history and could pass a fenced copy on the floor.
 
-A restart only removes peak candidates. The merge point bills the prose that the document contains at the merge.
+The points of the curve are the branch commits that the walk reaches. A branch commit that the walk does not reach wrote prose that the document no longer holds.
+
+This one rule gives each case its answer without a special case. A merge that takes the trunk's copy follows only the trunk parent, which is outside the branch, so the curve starts again after it. A merge that keeps the first parent's copy, as `-s ours` does, follows no side commit, so a discarded side branch cannot raise the peak. A side branch that the merge takes, a kept side branch, and a pulled collaborator's commits are followed, with their own drafts and passes. On the merge ref that the installed workflow checks out, the merge holds the head's copy, or edits both, so the walk follows the pull request. On the head that EngOS's workflow checks out, the walk starts at the head. Both must give the same curve.
+
+Dates and parent order play no part.
 
 ## Shapes
 
@@ -47,19 +55,32 @@ Each shape gets a test, written first, that builds the history in a temporary re
 | 4 | Distil 200 to 100, then `-s ours` merge of a side branch at 300 | `[200, 100]` | target |
 | 5 | Draft 300, then a merge moves 260 into a fence | `[300, 40]` | target, parking report, stamp |
 | 6 | Shape 5, but the fence move is on a side branch that the merge takes fully | `[300, 40]` | as shape 5 |
-| 7 | The trunk made the same change, so the merge equals both parents | `[200, 90]` | target |
+| 7 | The trunk made the same change, so the merge equals both parents | `[110, 0]`, the trunk holds the 90 | target |
 | 8 | A trunk merge changes a document that the branch did not touch | none | not examined |
 | 9 | Two full trunk takes, then 30 new words | `[30]` | floor |
 | 10 | An octopus merge with the trunk in any non-first position | as shape 1 | blocked |
-| 11 | A stamp names a draft before a restart | none | the error names the restart merge and asks for a new stamp |
+| 11 | A stamp names a draft that the walk does not reach | none | the error says the document no longer holds that draft and asks for a new stamp |
+| 12 | Shape 1, plus a side commit dated after the trunk take and merged later | `[60]` | blocked |
+| 13 | A side branch takes the trunk's copy, and the branch discards that side with `-s ours` after it fences its draft | starts at the draft | parking report, no restart |
+| 14 | The trunk deletes the document, the merge takes the deletion, and the branch writes 60 new words | `[60]` | blocked |
+| 15 | The branch drafts a document the trunk never had, deletes it at a merge, and adds it again fenced | `[300, 40]` | target, parking report, stamp |
+| 16 | Shape 1, but the branch renamed the document before the merge | `[60]` | blocked |
+| 17 | After a trunk take, a side branch forked before it drafts 300, distils to 100, and is merged | `[300, 100]` | target |
+| 18 | Passes made on a side branch that the merge keeps: 300, 180, 170, 165 | `[300, 180, 170, 165]` | converged |
+| 19 | `git pull` merges a collaborator's draft and passes into a local commit | the collaborator's curve | as it was before the pull, stamp kept |
+| 20 | The installed workflow's merge ref, against the same branch's head | the head's curve | the head's verdict |
+| 21 | Distil 200 to 140, then `-s ours` merge of a side branch at 300 | `[200, 140]` | blocked |
+| 22 | A stacked child merges its parent feature branch, which drafted 300 and distilled to 140 | `[300, 140]` | target |
 
 ## Limit
 
-A resolver can take most of the trunk version and keep some branch lines. Then the merge is equal to no parent, and the gate reads it as a branch edit. Shapes 2 and 3 need that reading. The README will state this limit.
+A resolver can take most of the trunk version and keep some branch lines. Then the merge is equal to no parent, and the gate follows every parent, so the branch's earlier peak stays. Shapes 2 and 3 need that reading. The README will state this limit.
+
+Git older than 2.31 has no `--diff-merges`, so a rename made by a merge can go unseen. The README already states this.
 
 ## Implementation, in a follow-up pull request
 
-- `branchOf` gets merges, their parents, and the trunk parents from one `rev-list --parents`.
-- `measureCurve` compares blobs at each merge with its first parent and its trunk parents, and records the latest restart.
-- The curve, the baseline, and the parking report use the points from the restart. `verifyStamp` names the restart.
-- Run `/code-review high`. For each condition (identical, trunk parent, first parent, latest), make a mutation that causes its shape test to fail.
+- `branchOf` lists the branch range with its parents from one `rev-list --parents`.
+- `measureCurve` walks back from HEAD per document, following parents by the rule, and keeps the points of the commits it reaches.
+- The curve, the baseline, the parking report and `verifyStamp` use those points.
+- Each shape gets a test written first, and each condition of the rule gets a mutation that fails its shape's test. Run `/code-review high`.
