@@ -731,14 +731,14 @@ export function verifyStamp(repoDir, path, branch = branchOf(repoDir), measured 
 
   // The field is a command, not a label: git show it and the draft comes back,
   // under the name it was drafted with. That is the one name a rename cannot
-  // invalidate. Here git cat-file -e only asks that it resolves; the curve
-  // below decides the rest. The stamp is text a pull request wrote, so only the shape
+  // invalidate. The stamp is text a pull request wrote, so only the shape
   // stampRevParts accepts reaches git: an abbreviated commit, a colon, a name.
   // That keeps an option such as `--output=` away from git, and an empty commit
   // part, which git reads as the index, from matching every commit.
   const parts = stampRevParts(stamp.rev);
   if (parts === null) return { ok: false, problem: `${stamp.rev} is not <commit>:<path>` };
   const { sha: draftSha, name: draftName } = parts;
+  // cat-file -e only asks that the revision resolves; the curve decides the rest.
   try {
     git(repoDir, 'cat-file', '-e', stamp.rev);
   } catch {

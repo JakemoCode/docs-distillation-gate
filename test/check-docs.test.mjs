@@ -2260,7 +2260,9 @@ test('a stamp with no commit part is refused', async (t) => {
 
 // A folded trailer carries its value on the next line, which is not this one.
 test('a bare override trailer is not an override', () => {
-  assert.deepEqual(parseOverrides([{ sha: 'abc', author: 'Ada', message: 'Doc-distill-override:' }], new Set(['docs/x.md'])), []);
+  const bare = ['Doc-distill-override:', 'Doc-distill-override:   ', 'Doc-distill-override:\r'];
+  const commits = bare.map((message) => ({ sha: 'abc', author: 'Ada', message }));
+  assert.deepEqual(parseOverrides(commits, new Set(['docs/x.md'])), []);
 });
 
 // A SHA-256 id runs to 64 characters, so git, not a length, decides.
@@ -2274,7 +2276,10 @@ test('a stamp naming a 64-character commit reaches git', async (t) => {
 test('a stamp whose commit is written in capitals proves itself', async (t) => {
   const r = distilledBranch(t);
   const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
-  stampWith(r, printed.replace(/distilled: ([0-9a-f]+):/, (_, sha) => `distilled: ${sha.toUpperCase()}:`));
+  // The full id, so the capitals are certain to change it: a short one can be all digits.
+  const capitals = printed.replace(/distilled: ([0-9a-f]+):/, (_, sha) => `distilled: ${r.git('rev-parse', sha).toUpperCase()}:`);
+  assert.match(capitals, /distilled: [0-9A-F]*[A-F][0-9A-F]*:/);
+  stampWith(r, capitals);
 
   assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: true, problem: null });
 });
