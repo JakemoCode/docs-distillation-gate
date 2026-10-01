@@ -114,7 +114,8 @@ test('readStamp reads a first line with a long run of spaces in linear time', ()
   const line = `<!-- distilled: x${' '.repeat(100_000)}y -->`;
   const started = performance.now();
   assert.equal(readStamp(line), null);
-  assert.ok(performance.now() - started < 500, `took ${Math.round(performance.now() - started)}ms`);
+  // The old pattern took 5.5s here; this one takes about 1ms. The margin is for slow runners.
+  assert.ok(performance.now() - started < 2000,`took ${Math.round(performance.now() - started)}ms`);
 });
 
 test('readStamp reports an unstamped document as null', () => {
@@ -866,24 +867,6 @@ test('an override line in the body, outside the trailer block, is not an overrid
   assertNoCrash(run);
   assert.equal(run.code, 1);
   assert.doesNotMatch(run.stdout, /Override: docs\/new\.md/);
-  assert.match(run.stdout, /has a Doc-distill-override line outside its trailer block, so it does not count/);
-});
-
-// A configured trailer key lets git read a last paragraph that is only partly
-// trailers. The gate leaves global config out, so this machine and CI agree.
-test("a contributor's trailer config does not widen what counts as an override", async (t) => {
-  const r = branchWithBlock(t);
-  const home = mkdtempSync(join(tmpdir(), 'doc-gate-home-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
-  writeFileSync(join(home, '.gitconfig'), '[trailer "ddo"]\n\tkey = Doc-distill-override\n');
-  r.git('commit', '-q', '--allow-empty', '-m',
-    'docs: keep the table\n\nThe table is load-bearing.\nDoc-distill-override: docs/new.md would delete the table');
-
-  const run = runCli(r.dir, { GIT_CONFIG_GLOBAL: join(home, '.gitconfig') });
-
-  assertNoCrash(run);
-  assert.equal(run.code, 1);
-  assert.doesNotMatch(run.stdout, /Override: docs\/new\.md/);
 });
 
 test('overrideCommits reads every trailer value, empty ones included, in any key case', async (t) => {
@@ -892,13 +875,17 @@ test('overrideCommits reads every trailer value, empty ones included, in any key
     'docs: two waivers\n\nDoc-distill-override:\nSigned-off-by: Ada <ada@example.com>\ndoc-distill-override: docs/new.md two\nDOC-DISTILL-OVERRIDE: docs/other.md three');
   r.git('commit', '-q', '--allow-empty', '-m', 'docs: nothing to waive');
 
-  const commits = overrideCommits(r.dir, 'main..HEAD').map(({ values, unread }) => ({ values, unread }));
+  const values = overrideCommits(r.dir, 'main..HEAD').map((commit) => commit.values);
 
-  assert.deepEqual(commits, [
-    { values: [], unread: false },
-    { values: ['', 'docs/new.md two', 'docs/other.md three'], unread: false },
-    { values: [], unread: false },
-  ]);
+  assert.deepEqual(values, [[], ['', 'docs/new.md two', 'docs/other.md three'], []]);
+});
+
+// The old-git check looks at what the placeholder printed, never at the message.
+test('a message that mentions the %(trailers) placeholder is read as a message', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: read %(trailers:key=X) from git\n\nNo override here.');
+
+  assert.deepEqual(overrideCommits(r.dir, 'main..HEAD').map((commit) => commit.values), [[], []]);
 });
 
 test('an override trailer with no value is reported as naming no file', async (t) => {
