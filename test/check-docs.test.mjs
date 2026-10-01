@@ -2258,17 +2258,25 @@ test('a stamp with no commit part is refused', async (t) => {
   assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: ':docs/x.md is not <commit>:<path>' });
 });
 
-test('an override trailer naming no file is reported as naming none', () => {
-  const [override] = parseOverrides([{ sha: 'abc', author: 'Ada', message: 'Doc-distill-override:' }], new Set(['docs/x.md']));
-  assert.deepEqual([override.valid, override.problem], [false, 'the override names no file']);
+// A folded trailer carries its value on the next line, which is not this one.
+test('a bare override trailer is not an override', () => {
+  assert.deepEqual(parseOverrides([{ sha: 'abc', author: 'Ada', message: 'Doc-distill-override:' }], new Set(['docs/x.md'])), []);
 });
 
-// A SHA-256 repository abbreviates to as many as 64 characters.
+// A SHA-256 id runs to 64 characters, so git, not a length, decides.
 test('a stamp naming a 64-character commit reaches git', async (t) => {
   const r = distilledBranch(t);
   stampWith(r, `<!-- distilled: ${'a'.repeat(64)}:docs/x.md 100->40 (40.0%) pass=1 -->`);
 
   assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: `${'a'.repeat(64)}:docs/x.md does not resolve` });
+});
+
+test('a stamp whose commit is written in capitals proves itself', async (t) => {
+  const r = distilledBranch(t);
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
+  stampWith(r, printed.replace(/distilled: ([0-9a-f]+):/, (_, sha) => `distilled: ${sha.toUpperCase()}:`));
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: true, problem: null });
 });
 
 test('an override takes the longest gated name its text starts with', () => {
