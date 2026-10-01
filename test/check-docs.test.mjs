@@ -2246,8 +2246,35 @@ test('a stamp whose revision looks like an option is refused before git reads it
   stampWith(r, '<!-- distilled: --output=written-by-stamp 100->40 (40.0%) pass=1 -->');
 
   const { ok, problem } = verifyStamp(r.dir, 'docs/x.md');
-  assert.deepEqual([ok, problem], [false, '--output=written-by-stamp does not resolve']);
+  assert.deepEqual([ok, problem], [false, '--output=written-by-stamp is not <commit>:<path>']);
   assert.equal(existsSync(join(r.dir, 'written-by-stamp')), false);
+});
+
+// `git show :docs/x.md` reads the index, and an empty prefix matches every commit.
+test('a stamp with no commit part is refused', async (t) => {
+  const r = distilledBranch(t);
+  stampWith(r, '<!-- distilled: :docs/x.md 100->40 (40.0%) pass=1 -->');
+
+  assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: false, problem: ':docs/x.md is not <commit>:<path>' });
+});
+
+test('an override trailer naming no file is not an override', () => {
+  assert.deepEqual(parseOverrides([{ sha: 'abc', author: 'Ada', message: 'Doc-distill-override:' }], new Set(['docs/x.md'])), []);
+});
+
+test('an override takes the longest gated name its text starts with', () => {
+  const gated = new Set(['docs/a.md', 'docs/a b.md']);
+  const commits = [
+    { sha: 'abc', author: 'Ada', message: 'Doc-distill-override: docs/a b.md the table cannot shrink' },
+    { sha: 'def', author: 'Ada', message: 'Doc-distill-override: docs/a b.md' },
+  ];
+  assert.deepEqual(
+    parseOverrides(commits, gated).map(({ file, reason, problem }) => [file, reason, problem]),
+    [
+      ['docs/a b.md', 'the table cannot shrink', null],
+      ['docs/a b.md', '', 'the override carries no reason'],
+    ],
+  );
 });
 
 test('the stamp the gate prints for a name with a space proves itself', async (t) => {
