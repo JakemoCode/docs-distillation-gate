@@ -98,8 +98,9 @@ Add a trailer to a commit message naming the file and the reason:
 Doc-distill-override: docs/wire-protocol.md would delete the wire format table
 ```
 
-Put it in the message's last paragraph, the trailer block git reads. The
-gate ignores the same line anywhere else.
+Give it its own last paragraph, after a blank line below the subject. git
+reads that paragraph as the trailer block, and the gate ignores the line
+anywhere else. The key matches in any case, and the gate needs git 2.22.
 
 Nothing can check the reason, so the gate reports who wrote it. An override on
 a real block gets one quiet line. An override where nothing was blocked means

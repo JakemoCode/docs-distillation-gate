@@ -85,21 +85,38 @@ export function verdict(counts) {
 
 // Doc-distill-override: docs/wire-protocol.md would delete the wire format table
 //
-// git reads it from the trailer block and unfolds it, so a body line that
-// starts the same way is prose, and a value folded onto the next line counts.
-const OVERRIDE_FORMAT = '%h%x00%an%x00%(trailers:key=Doc-distill-override,valueonly,unfold)%x1e';
+// git reads it from the trailer block, the message's last paragraph, and
+// unfolds it, so a value folded onto the next line counts and the same line
+// in the subject or an earlier paragraph does not. git matches the key in any
+// case. %(trailers) arrived in git 2.22.
+const OVERRIDE_FORMAT = '%h%x00%an%x00%(trailers:key=Doc-distill-override,valueonly,unfold)%x00%B%x1e';
+const OVERRIDE_LINE = /^doc-distill-override\s*:/im;
 
-/** Each commit in `range` with the values of its override trailers. */
+/**
+ * Each commit in `range` with the values of its override trailers, and whether
+ * it wrote an override line git did not read as a trailer.
+ *
+ * Which lines git calls trailers depends on trailer.* config: a configured key
+ * lets a last paragraph that is only partly trailers count. Global and system
+ * config are left out, so a contributor's machine and CI read the same block.
+ */
 export function overrideCommits(repoDir, range) {
-  return git(repoDir, 'log', `--format=${OVERRIDE_FORMAT}`, range)
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const listing = gitIn(repoDir, env, [
+    '-c', 'trailer.separators=:', 'log', '--no-show-signature', `--format=${OVERRIDE_FORMAT}`, range,
+  ]);
+  if (listing.includes('%(trailers')) {
+    throw new Error('docs-distill reads override trailers with %(trailers), which needs git 2.22 or later.');
+  }
+  return listing
     .split('\u001e')
     .filter((record) => record.trim() !== '')
     .map((record) => {
-      const [sha, author, listed] = record.replace(/^\n/, '').split('\u0000');
+      const [sha, author, listed, message] = record.replace(/^\n/, '').split('\u0000');
       // valueonly ends each value with a newline, and a trailer with no value
       // is an empty line, which stays so it can be reported.
       const values = listed === '' ? [] : listed.replace(/\n$/, '').split('\n');
-      return { sha, author, values };
+      return { sha, author, values, unread: values.length === 0 && OVERRIDE_LINE.test(message) };
     });
 }
 
@@ -147,9 +164,11 @@ export function parseOverrides(commits, gatedFiles) {
 // The leading field is a git revision, not a bare hash. `git show` it and the
 // draft comes back under the name it was drafted with, which is the one name a
 // rename cannot invalidate. The revision runs to the curve, so a name with a
-// space in it still reads whole.
-const STAMP_PATTERN =
-  /^<!--\s*distilled:\s*(\S.*?)\s+([\d>-]+)\s+\(([\d.]+)%\)\s*(converged\s+)?pass=(\d+)\s*-->$/;
+// space in it still reads whole. The revision is what lies between the head
+// and the tail, matched apart: one pattern holding all three backtracks once
+// per space in a long run, which makes a line of spaces a slow gate.
+const STAMP_HEAD = /^<!--\s*distilled:\s*/;
+const STAMP_TAIL = /\s([\d>-]+)\s+\(([\d.]+)%\)\s*(converged\s+)?pass=(\d+)\s*-->$/;
 
 /**
  * Write the stamp for a measured curve.
@@ -177,10 +196,16 @@ export function readStamp(text) {
   const first = text.split('\n').find((line) => line.trim() !== '');
   if (first === undefined) return null;
 
-  const found = STAMP_PATTERN.exec(first.trim());
-  if (found === null) return null;
+  const line = first.trim();
+  const head = STAMP_HEAD.exec(line);
+  if (head === null) return null;
+  const rest = line.slice(head[0].length);
+  const tail = STAMP_TAIL.exec(rest);
+  if (tail === null) return null;
+  const rev = rest.slice(0, tail.index).trimEnd();
+  if (rev === '') return null;
 
-  const [, rev, curve, percent, converged, pass] = found;
+  const [, curve, percent, converged, pass] = tail;
   return {
     rev,
     counts: curve.split('->').map(Number),
@@ -278,6 +303,11 @@ const BASE_BRANCH = CONFIG.baseBranch;
 const RENAME_THRESHOLD = '-M5%';
 
 function git(repoDir, ...args) {
+  return gitIn(repoDir, undefined, args);
+}
+
+/** git with `env` in place of the inherited environment when it is given. */
+function gitIn(repoDir, env, args) {
   // stderr is captured, never inherited. Probing for a blob that is not there
   // is a normal question to ask git, and its answer must not reach the caller's
   // stderr, where it would be indistinguishable from a crash.
@@ -285,6 +315,7 @@ function git(repoDir, ...args) {
   // --literal-pathspecs: a document named `:x.md` or `[draft].md` is a path, not magic.
   return execFileSync('git', ['-c', 'core.quotePath=false', '--literal-pathspecs', ...args], {
     cwd: repoDir,
+    env,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     // The default is one megabyte. A tree listing or a long diff passes it, and
@@ -888,7 +919,8 @@ function main() {
   const mergeBase = branch.mergeBase;
   const changed = changedGatedFiles(repoDir, mergeBase);
 
-  const overrides = parseOverrides(overrideCommits(repoDir, `${mergeBase}..HEAD`), gatedFilesAtHead(repoDir));
+  const commits = overrideCommits(repoDir, `${mergeBase}..HEAD`);
+  const overrides = parseOverrides(commits, gatedFilesAtHead(repoDir));
   const overridden = new Set(overrides.filter((o) => o.valid).map((o) => o.file));
 
   const blocks = [];
@@ -1011,6 +1043,16 @@ function main() {
   for (const override of overrides.filter((o) => !o.valid)) {
     out.push(`Override in ${override.sha} by ${override.author} is not usable: ${override.problem}.`);
     failed = true;
+  }
+
+  // An override line git did not read as a trailer clears nothing. Saying so
+  // is the difference between a block the author understands and one that
+  // looks like the gate ignoring them.
+  for (const { sha, author } of commits.filter((commit) => commit.unread)) {
+    out.push(
+      `Commit ${sha} by ${author} has a Doc-distill-override line outside its trailer block, so it does not count.`,
+      '  Put the trailer in its own last paragraph, after a blank line.',
+    );
   }
 
   // A refusal to measure is a block, so an override answering one is reported
