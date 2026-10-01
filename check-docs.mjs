@@ -84,7 +84,7 @@ export function verdict(counts) {
 }
 
 // Doc-distill-override: docs/wire-protocol.md would delete the wire format table
-const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(\S.*)$/;
+const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(.*)$/;
 
 /**
  * The file a trailer names, and its reason. A gated name may hold a space, so
@@ -116,7 +116,8 @@ export function parseOverrides(commits, gatedFiles) {
       const { file, reason } = overrideTarget(found[1], gatedFiles);
 
       let problem = null;
-      if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
+      if (file === '') problem = 'the override names no file';
+      else if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
       else if (reason === '') problem = 'the override carries no reason';
 
       overrides.push({ sha, author, file, reason, valid: problem === null, problem });
@@ -702,10 +703,15 @@ function baselineOf(repoDir, path, points) {
   return { baseline: peak.count, rev: `${short}:${peak.name}` };
 }
 
-/** A stamp's revision as the commit and name baselineOf wrote. git reads `<rev>:<path>` at the first colon, and a name may hold more. */
+/**
+ * A stamp's revision as the commit and name baselineOf writes for a measured
+ * curve, or null for any other shape. git reads `<rev>:<path>` at the first
+ * colon, and a name may hold more. An abbreviation runs to 64 characters in a
+ * SHA-256 repository.
+ */
 function stampRevParts(rev) {
-  const colon = rev.indexOf(':');
-  return colon === -1 ? { sha: rev, name: undefined } : { sha: rev.slice(0, colon), name: rev.slice(colon + 1) };
+  const found = /^([0-9a-f]{4,64}):(.+)$/s.exec(rev);
+  return found === null ? null : { sha: found[1], name: found[2] };
 }
 
 /**
@@ -726,15 +732,14 @@ export function verifyStamp(repoDir, path, branch = branchOf(repoDir), measured 
   // The field is a command, not a label: git show it and the draft comes back,
   // under the name it was drafted with. That is the one name a rename cannot
   // invalidate. The stamp is text a pull request wrote, so only the shape
-  // baselineOf writes reaches git: an abbreviated commit, a colon, a name. That
-  // keeps an option such as `--output=` away from git show, and an empty commit
+  // stampRevParts accepts reaches git: an abbreviated commit, a colon, a name.
+  // That keeps an option such as `--output=` away from git, and an empty commit
   // part, which git reads as the index, from matching every commit.
-  const { sha: draftSha, name: draftName } = stampRevParts(stamp.rev);
-  if (!/^[0-9a-f]{4,40}$/.test(draftSha) || !draftName) {
-    return { ok: false, problem: `${stamp.rev} is not <commit>:<path>` };
-  }
+  const parts = stampRevParts(stamp.rev);
+  if (parts === null) return { ok: false, problem: `${stamp.rev} is not <commit>:<path>` };
+  const { sha: draftSha, name: draftName } = parts;
   try {
-    git(repoDir, 'show', stamp.rev);
+    git(repoDir, 'cat-file', '-e', stamp.rev);
   } catch {
     return { ok: false, problem: `${stamp.rev} does not resolve` };
   }
