@@ -1,7 +1,7 @@
 <!-- distilled: ca8217d:SCOPE-merge-attribution.md 818->384 (46.9%) pass=1 -->
 # Scope: who made a fall at a merge
 
-Status: proposed, revised. It follows PR #8 and replaces PR #9 and this scope's first rule.
+Status: implemented. It follows PR #8 and replaces PR #9 and this scope's first rule.
 
 ## Problem
 
@@ -35,7 +35,7 @@ The curve follows the prose of the document at HEAD back through the commits tha
 
 Look up the document under every name it had. An absent copy matches an absent parent only if the document existed where that parent and the first parent met (shape 15).
 
-The points are the branch commits that the walk reaches. Dates and parent order do not matter. The merge ref and the head give the same curve (shape 20).
+The points are the branch commits that the walk reaches, in ancestry order. Dates order only commits on parallel lines. The merge ref and the head give the same curve (shape 20).
 
 ## Shapes
 
@@ -69,9 +69,3 @@ Each shape gets a test, written first, that builds the history in a temporary re
 ## Limit
 
 A resolver can take most of the trunk version and keep some branch lines. Then the merge equals no parent, the walk follows every parent, and the earlier peak stays. Shapes 2 and 3 need that reading. The README will state this limit.
-
-## Implementation, in a follow-up pull request
-
-- `branchOf` lists the range with its parents from one `rev-list --parents`.
-- `measureCurve` walks back from HEAD per document and keeps the points it reaches.
-- Each shape gets a test written first. Each rule condition gets a mutation that fails a shape test. Run `/code-review high`.

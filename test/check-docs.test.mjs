@@ -1497,3 +1497,691 @@ test('a trunk merge does not add the trunk\'s prose to the curve', async (t) => 
   assert.equal(alone.baseline, 200, 'the branch is billed for its own 200 words');
   assert.deepEqual(merged, alone, 'and for exactly the same words after the merge');
 });
+
+// The lineage walk: SCOPE-merge-attribution.md. The curve follows the prose of
+// the document at HEAD back through the commits that made it. At a merge it
+// follows only the parents whose copy the merge took, or every parent when the
+// merge edited the document. Each test below is a row of the scope's table.
+
+/** A repo with a root commit on main and `feat` checked out from it. */
+function shapeRepo(t) {
+  const r = repo(t);
+  r.write('README.md', 'Root.');
+  r.commit('chore: init');
+  r.git('checkout', '-q', '-b', 'feat');
+  return r;
+}
+
+const curveAt = (r, path) => curveOf(measureCurve(r.dir, path).points);
+
+/** Commit with a committer date far in the future, so rev-list sorts it last. */
+function commitLate(r, message) {
+  r.git('add', '-A');
+  execFileSync('git', ['commit', '-q', '-m', message], {
+    cwd: r.dir,
+    env: { ...process.env, GIT_COMMITTER_DATE: '2099-01-01T00:00:00Z', GIT_AUTHOR_DATE: '2099-01-01T00:00:00Z' },
+  });
+}
+
+/**
+ * Shape 1's history: the child carries its parent's 300-word draft, the trunk
+ * holds the parent's 140-word squash, and the child takes the trunk's copy.
+ */
+function stackedChild(t) {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: the parent draft');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(140, 'draft'));
+  r.commit('docs: the parent, distilled and squashed');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '-X', 'theirs', 'main');
+  return r;
+}
+
+/** The 300-word draft of shapes 5, 6 and 15 with 260 of its words in a fence. */
+const fenced = () => `${lines(40, 'draft')}\n\`\`\`\n${lines(260, 'parked')}\n\`\`\``;
+
+/** Assert the gate reports parked words and asks for a stamp. */
+function assertParkedAndUnstamped(r) {
+  const run = runCli(r.dir);
+  assertNoCrash(run);
+  assert.match(run.stdout, /appeared in fenced blocks/);
+  assert.match(run.stdout, /carries no stamp/);
+}
+
+test('shape 1: a child that takes the trunk squash of its parent is measured on its own words', async (t) => {
+  const r = stackedChild(t);
+  r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(60, 'child')}`);
+  r.commit('docs: the child adds 60 words');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [60]);
+  assert.equal(verdict(curve).pass, false);
+});
+
+test('shape 2: a distilled branch keeps its curve through a trunk edit to the same document', async (t) => {
+  const r = shapeRepo(t);
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(100, 'trunk'));
+  r.commit('docs: the page');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+  r.write('docs/x.md', `${lines(100, 'trunk')}\n${lines(200, 'draft')}`);
+  r.commit('docs: draft');
+  r.write('docs/x.md', `${lines(100, 'trunk')}\n${lines(90, 'draft')}`);
+  r.commit('docs: distil');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(100, 'trunk').replace(/^trunk([0-9])$/gm, 'edited$1'));
+  r.commit('docs: the trunk edits ten lines');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [200, 90]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'target' });
+});
+
+test('shape 3: a cut made while resolving the merge is the branch distilling', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/y.md', lines(200, 'draft'));
+  r.commit('docs: draft');
+  r.git('checkout', '-q', 'main');
+  r.write('other.txt', 'trunk moved on');
+  r.commit('chore: trunk work');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-commit', '--no-ff', 'main');
+  r.write('docs/y.md', lines(90, 'draft'));
+  r.commit('merge main, cutting the draft');
+
+  const curve = curveAt(r, 'docs/y.md');
+  assert.deepEqual(curve, [200, 90]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'target' });
+});
+
+/** Shapes 4 and 21: a draft of 200, one pass to `kept`, then an -s ours merge of a side branch at 300. */
+function discardedSide(t, kept) {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(200, 'draft'));
+  const draft = r.commit('docs: draft');
+  r.write('docs/x.md', lines(kept, 'draft'));
+  r.commit('docs: a pass');
+
+  r.git('checkout', '-q', '-b', 'side', draft);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: the side branch grows it');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '-s', 'ours', 'side');
+  return r;
+}
+
+test('shape 4: an -s ours merge of a side branch does not raise the peak', async (t) => {
+  const curve = curveAt(discardedSide(t, 100), 'docs/x.md');
+  assert.deepEqual(curve, [200, 100]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'target' });
+});
+
+test('shape 5: a merge that moves a draft into a fence is the branch editing', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', `${lines(40, 'draft')}\n${lines(260, 'parked')}`);
+  r.commit('docs: draft');
+  r.git('checkout', '-q', 'main');
+  r.write('other.txt', 'trunk moved on');
+  r.commit('chore: trunk work');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-commit', '--no-ff', 'main');
+  r.write('docs/x.md', fenced());
+  r.commit('merge main, fencing the draft');
+
+  assert.deepEqual(curveAt(r, 'docs/x.md'), [300, 40]);
+  assertParkedAndUnstamped(r);
+});
+
+test('shape 6: a side branch taken wholesale carries its own history', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', `${lines(40, 'draft')}\n${lines(260, 'parked')}`);
+  r.commit('docs: draft');
+  r.git('checkout', '-q', '-b', 'side');
+  r.write('docs/x.md', fenced());
+  r.commit('docs: fence the draft on a side branch');
+  r.git('checkout', '-q', 'feat');
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'side');
+
+  assert.deepEqual(curveAt(r, 'docs/x.md'), [300, 40]);
+  assertParkedAndUnstamped(r);
+});
+
+test('shape 7: a merge equal to both parents follows both', async (t) => {
+  const r = shapeRepo(t);
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(100, 'trunk'));
+  r.commit('docs: the page');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+  r.write('docs/x.md', `${lines(100, 'trunk')}\n${lines(200, 'draft')}`);
+  r.commit('docs: draft');
+  r.write('docs/x.md', `${lines(100, 'trunk')}\n${lines(90, 'draft')}`);
+  r.commit('docs: distil');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', `${lines(100, 'trunk')}\n${lines(90, 'draft')}`);
+  r.commit('docs: the trunk makes the same change');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'main');
+
+  // The trunk now holds the branch's 90 lines; the 110 it never took still set the peak.
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [110, 0]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'target' });
+});
+
+test('shape 8: a document only the trunk changed is not examined', async (t) => {
+  const r = shapeRepo(t);
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(200, 'trunk'));
+  r.commit('docs: the trunk writes a page');
+  r.git('checkout', '-q', 'feat');
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+  r.git('merge', '-q', '--no-edit', 'main');
+
+  const run = runCli(r.dir, {}, ['--summary']);
+  assertNoCrash(run);
+  assert.match(run.stdout, /examined no gated documents/);
+  assert.equal(run.code, 0);
+});
+
+test('shape 9: the latest of two wholesale trunk takes decides', async (t) => {
+  const r = stackedChild(t);
+  r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(200, 'child')}`);
+  r.commit('docs: the child drafts more');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(120, 'draft'));
+  r.commit('docs: the trunk distils the page again');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-commit', '--no-ff', '-X', 'theirs', 'main');
+  r.write('docs/x.md', lines(120, 'draft'));
+  r.commit('merge main, taking its page');
+  r.write('docs/x.md', `${lines(120, 'draft')}\n${words(30)}`);
+  r.commit('docs: the child adds 30 words');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [30]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'floor' });
+});
+
+for (const [position, order] of [['third', ['side', 'main']], ['second', ['main', 'side']]]) {
+  test(`shape 10: an octopus merge follows its trunk parent in the ${position} position`, async (t) => {
+    const r = stackedChild(t);
+    r.git('reset', '-q', '--hard', 'HEAD^1');
+    r.git('checkout', '-q', '-b', 'side');
+    r.write('side.txt', 'side work');
+    r.commit('chore: side work');
+    r.git('checkout', '-q', 'feat');
+    const tree = r.git('rev-parse', 'main^{tree}');
+    const octopus = r.git('commit-tree', tree, '-p', 'HEAD', '-p', order[0], '-p', order[1], '-m', 'octopus');
+    r.git('reset', '-q', '--hard', octopus);
+    r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(60, 'child')}`);
+    r.commit('docs: the child adds 60 words');
+
+    const curve = curveAt(r, 'docs/x.md');
+    assert.deepEqual(curve, [60]);
+    assert.equal(verdict(curve).pass, false);
+  });
+}
+
+test('shape 11: a stamp naming a commit the walk does not reach is refused', async (t) => {
+  const r = stackedChild(t);
+  const draft = r.git('rev-parse', '--short', 'HEAD^1');
+  r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(200, 'child')}`);
+  r.commit('docs: the child drafts 200 words');
+  r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(90, 'child')}`);
+  r.commit('docs: the child distils them');
+  r.write('docs/x.md', `<!-- distilled: ${draft}:docs/x.md 160->90 (56.3%) pass=1 -->\n${lines(140, 'draft')}\n${lines(90, 'child')}`);
+  r.commit('docs: a stamp naming the old draft');
+
+  const { ok, problem } = verifyStamp(r.dir, 'docs/x.md');
+  assert.equal(ok, false);
+  assert.match(problem, /no longer holds/);
+});
+
+test('shape 12: a later-dated side commit does not bring the old draft back', async (t) => {
+  const r = stackedChild(t);
+  const draft = r.git('rev-parse', 'HEAD^1');
+  r.git('checkout', '-q', '-b', 'side', draft);
+  r.write('side.txt', 'side work');
+  commitLate(r, 'chore: side work, dated last');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'side');
+  r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(60, 'child')}`);
+  r.commit('docs: the child adds 60 words');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [60]);
+  assert.equal(verdict(curve).pass, false);
+});
+
+test('shape 13: a trunk take on a side branch the branch discarded changes nothing', async (t) => {
+  const r = shapeRepo(t);
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(20, 'trunk'));
+  r.commit('docs: the page');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+  r.write('docs/x.md', `${lines(20, 'trunk')}\n${lines(15, 'draft')}\n${lines(260, 'parked')}`);
+  const draft = r.commit('docs: draft');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(20, 'edited'));
+  r.commit('docs: the trunk rewrites the page');
+
+  r.git('checkout', '-q', '-b', 'side', draft);
+  r.git('merge', '-q', '--no-commit', '--no-ff', '-X', 'theirs', 'main');
+  r.write('docs/x.md', lines(20, 'edited'));
+  r.commit('merge main, taking its page');
+
+  r.git('checkout', '-q', 'feat');
+  r.write('docs/x.md', `${lines(20, 'trunk')}\n${lines(15, 'draft')}\n\`\`\`\n${lines(260, 'parked')}\n\`\`\``);
+  r.commit('docs: fence the draft');
+  r.git('merge', '-q', '--no-edit', '-s', 'ours', 'side');
+
+  assert.equal(curveAt(r, 'docs/x.md')[0], 275);
+  const run = runCli(r.dir);
+  assertNoCrash(run);
+  assert.match(run.stdout, /appeared in fenced blocks/);
+});
+
+test('shape 14: a merge that takes the trunk deleting the document', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: the page lands on the trunk');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+
+  r.git('checkout', '-q', 'main');
+  r.git('rm', '-q', 'docs/x.md');
+  r.commit('docs: the trunk deletes the page');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+  r.write('docs/x.md', lines(60, 'fresh'));
+  r.commit('docs: a fresh page');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [60]);
+  assert.equal(verdict(curve).pass, false);
+});
+
+test('shape 15: a merge deleting a document the trunk never had keeps its history', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', `${lines(40, 'draft')}\n${lines(260, 'parked')}`);
+  r.commit('docs: draft');
+  r.git('checkout', '-q', 'main');
+  r.write('other.txt', 'trunk moved on');
+  r.commit('chore: trunk work');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-commit', '--no-ff', 'main');
+  r.git('rm', '-q', 'docs/x.md');
+  r.commit('merge main, dropping the draft');
+  r.write('docs/x.md', fenced());
+  r.commit('docs: the draft again, fenced');
+
+  assert.deepEqual(curveAt(r, 'docs/x.md'), [300, 40]);
+  assertParkedAndUnstamped(r);
+});
+
+test('shape 16: the walk finds the trunk copy under the name the trunk holds', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: the parent draft');
+  r.git('mv', 'docs/x.md', 'docs/y.md');
+  r.commit('docs: rename the page');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(140, 'draft'));
+  r.commit('docs: the parent, distilled and squashed');
+
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-commit', '--no-ff', '-X', 'theirs', 'main');
+  r.git('rm', '-q', '--cached', 'docs/x.md');
+  rmSync(join(r.dir, 'docs/x.md'));
+  r.write('docs/y.md', lines(140, 'draft'));
+  r.commit('merge main, taking its page under the new name');
+  r.write('docs/y.md', `${lines(140, 'draft')}\n${lines(60, 'child')}`);
+  r.commit('docs: the child adds 60 words');
+
+  assert.deepEqual(curveAt(r, 'docs/y.md'), [60]);
+});
+
+test('shape 17: a kept side branch forked before a trunk take keeps its drafting', async (t) => {
+  const r = shapeRepo(t);
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(100, 'trunk'));
+  r.commit('docs: the page');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+  r.write('notes.txt', 'branch work');
+  const fork = r.commit('chore: branch work');
+
+  r.git('checkout', '-q', 'main');
+  r.write('docs/x.md', lines(100, 'edited'));
+  r.commit('docs: the trunk rewrites the page');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', 'main');
+
+  r.git('checkout', '-q', '-b', 'side', fork);
+  r.write('docs/x.md', `${lines(100, 'trunk')}\n${lines(300, 'draft')}`);
+  r.commit('docs: draft on a side branch');
+  r.write('docs/x.md', `${lines(100, 'trunk')}\n${lines(100, 'draft')}`);
+  r.commit('docs: distil it');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-commit', '--no-ff', '-X', 'theirs', 'side');
+  r.write('docs/x.md', `${lines(100, 'edited')}\n${lines(100, 'draft')}`);
+  r.commit('merge the side branch');
+
+  // The merge edited the page, so both lines count; the order between them falls to commit dates.
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual([curve[0], curve.at(-1)], [300, 100]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'target' });
+});
+
+/** A 300-word draft and three passes that converge: 180, 175, 171. */
+function convergedOn(r, branch) {
+  r.git('checkout', '-q', '-b', branch);
+  for (const count of [180, 175, 171]) {
+    r.write('docs/x.md', lines(count, 'draft'));
+    r.commit(`docs: a pass to ${count}`);
+  }
+}
+
+test('shape 18: passes made on a kept side branch keep their convergence', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  convergedOn(r, 'side');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'side');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [300, 180, 175, 171]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'converged' });
+});
+
+test("shape 19: a pull of a collaborator's draft and passes keeps their curve and stamp", async (t) => {
+  const r = shapeRepo(t);
+  r.write('notes.txt', 'shared start');
+  r.commit('chore: shared start');
+  r.git('checkout', '-q', '-b', 'ada');
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  for (const count of [180, 175, 171]) {
+    r.write('docs/x.md', lines(count, 'draft'));
+    r.commit(`docs: a pass to ${count}`);
+  }
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:')).trim();
+  r.write('docs/x.md', `${printed}\n${lines(171, 'draft')}`);
+  r.commit('docs: stamp it');
+
+  r.git('checkout', '-q', 'feat');
+  r.write('local.txt', 'local work');
+  r.commit('chore: local work');
+  r.git('merge', '-q', '--no-edit', 'ada');
+
+  assert.deepEqual(curveAt(r, 'docs/x.md'), [300, 180, 175, 171]);
+  assert.deepEqual(verifyStamp(r.dir, 'docs/x.md'), { ok: true, problem: null });
+});
+
+test('shape 20: the merge ref measures the same curve as the head', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/x.md', lines(140, 'draft'));
+  r.commit('docs: distil');
+  const atHead = curveAt(r, 'docs/x.md');
+
+  r.git('checkout', '-q', 'main');
+  r.write('other.txt', 'trunk moved on');
+  r.commit('chore: trunk work');
+  r.git('checkout', '-q', '--detach', 'main');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'feat');
+
+  assert.deepEqual(atHead, [300, 140]);
+  assert.deepEqual(curveAt(r, 'docs/x.md'), atHead);
+});
+
+test('shape 21: a weak pass stays blocked behind an -s ours side branch', async (t) => {
+  const curve = curveAt(discardedSide(t, 140), 'docs/x.md');
+  assert.deepEqual(curve, [200, 140]);
+  assert.equal(verdict(curve).pass, false);
+});
+
+test('shape 22: a child that merges its parent branch carries its distillation', async (t) => {
+  const r = shapeRepo(t);
+  r.git('checkout', '-q', '-b', 'parent');
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: the parent draft');
+  r.write('docs/x.md', lines(140, 'draft'));
+  r.commit('docs: the parent distils it');
+  r.git('checkout', '-q', 'feat');
+  r.write('notes.txt', 'child work');
+  r.commit('chore: child work');
+  r.git('merge', '-q', '--no-edit', 'parent');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [300, 140]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'target' });
+});
+
+/** Commit with a fixed date, so rev-list's date order is the test's to choose. */
+function commitOn(r, message, day) {
+  r.git('add', '-A');
+  const date = `2026-01-${String(day).padStart(2, '0')}T00:00:00Z`;
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', message], {
+    cwd: r.dir,
+    env: { ...process.env, GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date },
+  });
+}
+
+test('the verdict does not depend on which side of a merge is its first parent', async (t) => {
+  const verdicts = [];
+  for (const [ours, theirs] of [['passes', 'typo'], ['typo', 'passes']]) {
+    const r = shapeRepo(t);
+    r.write('docs/x.md', lines(300, 'draft'));
+    commitOn(r, 'docs: draft', 1);
+    r.git('checkout', '-q', '-b', 'passes');
+    for (const [count, day] of [[180, 3], [175, 4], [171, 5]]) {
+      r.write('docs/x.md', lines(count, 'draft'));
+      commitOn(r, `docs: a pass to ${count}`, day);
+    }
+    r.git('checkout', '-q', '-b', 'typo', 'feat');
+    r.write('docs/x.md', `extra1\nextra2\n${lines(300, 'draft')}`);
+    commitOn(r, 'docs: a typo fix', 2);
+    r.git('checkout', '-q', ours);
+    r.git('merge', '-q', '--no-edit', '--no-ff', theirs);
+    verdicts.push(verdict(curveAt(r, 'docs/x.md')));
+  }
+  assert.deepEqual(verdicts[0], verdicts[1]);
+});
+
+test('passes on a side branch count across a rename on the line that keeps them', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  convergedOn(r, 'side');
+  r.git('checkout', '-q', 'feat');
+  r.git('mv', 'docs/x.md', 'docs/y.md');
+  r.commit('docs: rename the page');
+  r.git('merge', '-q', '--no-edit', 'side');
+
+  const curve = curveAt(r, 'docs/y.md');
+  assert.deepEqual(curve, [300, 180, 175, 171]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'converged' });
+});
+
+test("an override on the branch's own line survives a pull that takes the collaborator's copy", async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  const draft = r.commit('docs: draft');
+  r.write('docs/x.md', lines(191, 'draft'));
+  r.commit('docs: a pass');
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: waive it', '-m', 'Doc-distill-override: docs/x.md the table cannot shrink');
+
+  r.git('checkout', '-q', '-b', 'collaborator', draft);
+  r.write('docs/x.md', lines(190, 'draft'));
+  r.commit("docs: a collaborator's pass");
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '-X', 'theirs', 'collaborator');
+
+  const run = runCli(r.dir);
+  assertNoCrash(run);
+  assert.equal(run.code, 0, run.stdout);
+  assert.match(run.stdout, /cleared by/);
+});
+
+test("a merge that keeps the branch's own absence does not follow a side branch's draft", async (t) => {
+  const r = shapeRepo(t);
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+  r.git('checkout', '-q', '-b', 'side', 'main');
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: a draft on a side branch');
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '-s', 'ours', 'side');
+  r.write('docs/x.md', lines(60, 'fresh'));
+  r.commit('docs: a fresh page');
+
+  const curve = curveAt(r, 'docs/x.md');
+  assert.deepEqual(curve, [60]);
+  assert.equal(verdict(curve).pass, false);
+});
+
+test('passes on a side branch count across a rename made on that side branch', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.git('checkout', '-q', '-b', 'side');
+  r.git('mv', 'docs/x.md', 'docs/y.md');
+  r.commit('docs: rename the page');
+  for (const count of [180, 175, 171]) {
+    r.write('docs/y.md', lines(count, 'draft'));
+    r.commit(`docs: a pass to ${count}`);
+  }
+  r.git('checkout', '-q', 'feat');
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+  r.git('merge', '-q', '--no-edit', 'side');
+
+  const curve = curveAt(r, 'docs/y.md');
+  assert.deepEqual(curve, [300, 180, 175, 171]);
+  assert.deepEqual(verdict(curve), { pass: true, reason: 'converged' });
+});
+
+test('a document with a non-ASCII name is found at every revision', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/café.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  convergedOn(r, 'side');
+  for (const count of [180, 175, 171]) {
+    r.write('docs/café.md', lines(count, 'draft'));
+    r.commit(`docs: a pass to ${count} under the accented name`);
+  }
+  r.git('checkout', '-q', 'feat');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'side');
+
+  const curve = curveAt(r, 'docs/café.md');
+  assert.deepEqual(curve, [300, 180, 175, 171]);
+});
+
+test("an override on the branch's own line also counts on the merge ref", async (t) => {
+  const r = stackedChild(t);
+  r.git('reset', '-q', '--hard', 'HEAD^1');
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: waive it', '-m', 'Doc-distill-override: docs/x.md the table cannot shrink');
+  r.git('merge', '-q', '--no-edit', '-X', 'theirs', 'main');
+  r.write('docs/x.md', `${lines(140, 'draft')}\n${lines(60, 'child')}`);
+  r.commit('docs: the child adds 60 words');
+  const atHead = runCli(r.dir);
+
+  r.git('checkout', '-q', 'main');
+  r.write('other.txt', 'trunk moved on');
+  r.commit('chore: trunk work');
+  r.git('checkout', '-q', '--detach', 'main');
+  r.git('merge', '-q', '--no-edit', '--no-ff', 'feat');
+  const atMergeRef = runCli(r.dir);
+
+  assert.equal(atHead.code, 0, atHead.stdout);
+  assert.equal(atMergeRef.code, atHead.code, atMergeRef.stdout);
+});
+
+test('a stamp drafted under a name a side branch gave the document resolves', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(100, 'draft'));
+  r.commit('docs: a start');
+  r.git('checkout', '-q', '-b', 'side');
+  r.git('mv', 'docs/x.md', 'docs/y.md');
+  r.write('docs/y.md', lines(300, 'draft'));
+  r.commit('docs: rename and draft');
+  r.write('docs/y.md', lines(140, 'draft'));
+  r.commit('docs: distil');
+  r.git('checkout', '-q', 'feat');
+  r.write('notes.txt', 'branch work');
+  r.commit('chore: branch work');
+  r.git('merge', '-q', '--no-edit', 'side');
+
+  const printed = runCli(r.dir).stdout.split('\n').find((l) => l.includes('<!-- distilled:'));
+  assert.match(printed, /:docs\/y\.md /);
+  r.write('docs/y.md', `${printed.trim()}\n${lines(140, 'draft')}`);
+  r.commit('docs: stamp it');
+  assert.deepEqual(verifyStamp(r.dir, 'docs/y.md'), { ok: true, problem: null });
+});
+
+test('the gate examines a document with a non-ASCII name', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/café.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/café.md', lines(290, 'draft'));
+  r.commit('docs: a weak pass');
+
+  const run = runCli(r.dir, {}, ['--summary']);
+  assertNoCrash(run);
+  assert.match(run.stdout, /docs\/café\.md \(new\): 300 -> 290/);
+  assert.equal(run.code, 1);
+});
+
+test('the gate examines a document whose name looks like pathspec magic', async (t) => {
+  const r = shapeRepo(t);
+  r.write(':x.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.write(':x.md', lines(290, 'draft'));
+  r.commit('docs: a weak pass');
+
+  const run = runCli(r.dir, {}, ['--summary']);
+  assertNoCrash(run);
+  assert.match(run.stdout, /:x\.md \(new\): 300 -> 290/);
+  assert.equal(run.code, 1);
+});
+
+test("a stamp naming another file's draft is refused by name", async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/x.md', lines(100, 'draft'));
+  r.write('docs/other.md', lines(100, 'draft'));
+  const draft = r.git('rev-parse', '--short', r.commit('docs: two drafts'));
+  r.write('docs/x.md', lines(40, 'draft'));
+  r.commit('docs: distil');
+  r.write('docs/x.md', `<!-- distilled: ${draft}:docs/other.md 100->40 (40.0%) pass=1 -->\n${lines(40, 'draft')}`);
+  r.commit('docs: a stamp naming the other draft');
+
+  const { ok, problem } = verifyStamp(r.dir, 'docs/x.md');
+  assert.equal(ok, false);
+  assert.match(problem, /names a file other than docs\/x\.md/);
+});

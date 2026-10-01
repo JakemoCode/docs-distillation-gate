@@ -253,7 +253,9 @@ function git(repoDir, ...args) {
   // stderr is captured, never inherited. Probing for a blob that is not there
   // is a normal question to ask git, and its answer must not reach the caller's
   // stderr, where it would be indistinguishable from a crash.
-  return execFileSync('git', args, {
+  // core.quotePath=false: a path with a non-ASCII character comes back as written.
+  // --literal-pathspecs: a document named `:x.md` or `[draft].md` is a path, not magic.
+  return execFileSync('git', ['-c', 'core.quotePath=false', '--literal-pathspecs', ...args], {
     cwd: repoDir,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -303,14 +305,22 @@ function addedLineNumbers(diff) {
   return added;
 }
 
-/** True when `path` exists in the tree of `rev`. */
-function existsAt(repoDir, rev, path) {
+/** The blob each of `paths` names at `rev`, for those present, from one ls-tree. */
+function blobIdsAt(repoDir, rev, paths) {
+  const ids = new Map();
+  // --full-tree reads the paths from the root, wherever the gate runs. A failed
+  // listing stops the gate, because an absent document would steer the walk.
+  let listing;
   try {
-    git(repoDir, 'cat-file', '-e', `${rev}:${path}`);
-    return true;
-  } catch {
-    return false;
+    listing = git(repoDir, 'ls-tree', '--full-tree', rev, '--', ...paths);
+  } catch (error) {
+    throw new Error(`docs-distill cannot read ${rev}. ${String(error.stderr ?? error.message).trim()}`);
   }
+  for (const line of listing.split('\n')) {
+    const entry = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line);
+    if (entry !== null) ids.set(entry[2], entry[1]);
+  }
+  return ids;
 }
 
 /** The contents of `path` at `rev`, or null when it is not there. */
@@ -449,10 +459,97 @@ function addedSince(repoDir, base, sha, names) {
 /** The branch commits, newest first, and the merge base they are measured from. */
 export function branchOf(repoDir) {
   const mergeBase = mergeBaseOf(repoDir);
-  const revList = git(repoDir, 'rev-list', `${mergeBase}..HEAD`).trim();
-  const commits = revList === '' ? [] : revList.split('\n');
+  const parents = parentsOf(repoDir, `${mergeBase}..HEAD`);
+  const commits = [...parents.keys()];
 
-  return { mergeBase, commits, preMerge: preMergeBases(repoDir, mergeBase, commits) };
+  return { mergeBase, commits, parents, preMerge: preMergeBases(repoDir, mergeBase, commits) };
+}
+
+/**
+ * Each commit in `range` with its parents, children before parents, from one
+ * rev-list. Between commits that neither descends from, the commit date decides,
+ * so the order does not depend on which side of a merge is its first parent.
+ */
+function parentsOf(repoDir, range) {
+  const listed = git(repoDir, 'rev-list', '--date-order', '--parents', range).trim();
+  return new Map((listed === '' ? [] : listed.split('\n')).map((line) => line.split(' ')).map(([sha, ...rest]) => [sha, rest]));
+}
+
+const meets = new Map();
+
+/**
+ * Every merge base of two commits, cached for every document in the run. Git
+ * exits 1 when they share no history, which means none; any other failure
+ * stops the gate rather than steer the walk.
+ */
+function meetsOf(repoDir, first, parent) {
+  const key = `${repoDir} ${first} ${parent}`;
+  if (!meets.has(key)) {
+    try {
+      meets.set(key, git(repoDir, 'merge-base', '--all', first, parent).trim().split('\n'));
+    } catch (error) {
+      if (error.status !== 1) throw error;
+      meets.set(key, []);
+    }
+  }
+  return meets.get(key);
+}
+
+/**
+ * The document's copy at each revision, under whichever of its names it has
+ * there: `nameAt` gives the name and `copyAt` the blob, or null when absent.
+ */
+function documentCopies(repoDir, names) {
+  const found = new Map();
+  const lookup = (rev) => {
+    if (!found.has(rev)) {
+      const ids = blobIdsAt(repoDir, rev, names);
+      const name = names.find((each) => ids.has(each)) ?? null;
+      found.set(rev, { name, id: name === null ? null : ids.get(name) });
+    }
+    return found.get(rev);
+  };
+  return { nameAt: (rev) => lookup(rev).name, copyAt: (rev) => lookup(rev).id };
+}
+
+/**
+ * The branch commits whose prose the document at `tip` still holds: walk back
+ * from `tip`, and at a merge follow only the parents whose copy of the document
+ * the merge took byte-identical, or every parent when the merge edited it. An
+ * absent copy matches the first parent's absence, the side the merge was made
+ * on, and another parent's only where the document existed at a point where
+ * that parent and the first parent met: a branch that deletes its own draft at
+ * a merge keeps its history. Dates play no part in which commits it reaches.
+ * SCOPE-merge-attribution.md lists the shapes this answers.
+ */
+function lineage(repoDir, parents, tip, { copyAt }) {
+  const reached = new Set();
+  const met = new Map();
+  const metWithIt = (first, parent) => {
+    const key = `${first} ${parent}`;
+    if (!met.has(key)) met.set(key, holdsAtAMeet(first, parent));
+    return met.get(key);
+  };
+  const holdsAtAMeet = (first, parent) => meetsOf(repoDir, first, parent).some((base) => copyAt(base) !== null);
+
+  const pending = tip === undefined ? [] : [tip];
+  while (pending.length > 0) {
+    const sha = pending.pop();
+    if (reached.has(sha) || !parents.has(sha)) continue;
+    reached.add(sha);
+
+    const from = parents.get(sha);
+    if (from.length < 2) {
+      pending.push(...from);
+      continue;
+    }
+    const here = copyAt(sha);
+    const took = from.filter(
+      (parent, index) => copyAt(parent) === here && (here !== null || index === 0 || metWithIt(from[0], parent)),
+    );
+    pending.push(...(took.length > 0 ? took : from));
+  }
+  return reached;
 }
 
 /**
@@ -484,19 +581,28 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
   // and rewinding through the first kind lands on a name the trunk has already
   // stopped using. Whichever of the names is present at the merge base is the
   // one the branch inherited, whoever moved it and whenever.
-  const trunkName = names.find((name) => existsAt(repoDir, mergeBase, name));
+  const copies = documentCopies(repoDir, names);
+  const trunkName = copies.nameAt(mergeBase) ?? undefined;
   const kind = trunkName === undefined ? 'new' : 'edit';
 
+  // Only the commits whose prose the document still holds are points, so the
+  // rest are never measured.
+  const parents = branch.parents ?? parentsOf(repoDir, `${mergeBase}..${newestFirst[0] ?? mergeBase}`);
+  const reached = lineage(repoDir, parents, newestFirst[0], copies);
+
   const points = [];
-  for (const { sha, name } of [...history].reverse()) {
+  for (const sha of [...newestFirst].reverse()) {
+    if (!reached.has(sha)) continue;
     // Both kinds read the whole document. A draft is billed for all of it and
     // an edit only for the lines it added, but the text those lines are read
     // in is the same either way. Counting an edit from the diff slice alone
     // loses the fences around it, which both bills code as prose and hands
     // back prose as free, and leaves `fencesBalance` below describing a slice
     // rather than the document it is supposed to guard.
-    const text = blobAt(repoDir, sha, name);
-    if (text === null) continue; // the document did not exist yet
+    const id = copies.copyAt(sha);
+    if (id === null) continue; // the document did not exist yet
+    const name = copies.nameAt(sha);
+    const text = git(repoDir, 'cat-file', 'blob', id);
 
     // A line is the branch's own when it is new against both the current merge
     // base and the trunk commit this commit was built on. Against the current
@@ -518,7 +624,7 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
     points.push({ sha, name, count: prose, hidden, text });
   }
 
-  return { kind, points, trunkName };
+  return { kind, points, trunkName, reached };
 }
 
 /** The index of the first highest point: the draft, after STE has raised it. */
@@ -578,7 +684,7 @@ function baselineOf(repoDir, path, points) {
  * commit, so the claim outlives the evidence for it, and a stamp nobody proved
  * while the branch existed can never be proved afterwards.
  */
-export function verifyStamp(repoDir, path, branch = branchOf(repoDir)) {
+export function verifyStamp(repoDir, path, branch = branchOf(repoDir), measured = undefined) {
   const stamp = readStamp(blobAt(repoDir, 'HEAD', path) ?? '');
   if (stamp === null) return { ok: false, problem: `${path} carries no stamp` };
 
@@ -591,9 +697,19 @@ export function verifyStamp(repoDir, path, branch = branchOf(repoDir)) {
     return { ok: false, problem: `${stamp.rev} does not resolve` };
   }
 
-  const { points } = measureCurve(repoDir, path, branch);
-  const draftSha = stamp.rev.split(':')[0];
-  const drafted = points.find((point) => point.sha.startsWith(draftSha));
+  const { points, reached } = measured ?? measureCurve(repoDir, path, branch);
+  const [draftSha, draftName] = stamp.rev.split(':');
+  const drafted = points.find((point) => point.sha.startsWith(draftSha) && point.name === draftName);
+  const commits = branch.commits.filter((sha) => sha.startsWith(draftSha));
+  if (drafted === undefined && commits.some((sha) => reached.has(sha))) {
+    return { ok: false, problem: `${stamp.rev} names a file other than ${path}` };
+  }
+  if (drafted === undefined && commits.length > 0) {
+    return {
+      ok: false,
+      problem: `${stamp.rev} wrote prose that ${path} no longer holds, because a later merge took another copy. Write a new stamp.`,
+    };
+  }
   if (drafted === undefined) {
     return { ok: false, problem: `${stamp.rev} is not a commit of this branch` };
   }
@@ -605,11 +721,11 @@ export function verifyStamp(repoDir, path, branch = branchOf(repoDir)) {
     };
   }
 
-  const measured = curveOf(points);
-  if (measured.join('->') !== stamp.counts.join('->')) {
+  const curve = curveOf(points);
+  if (curve.join('->') !== stamp.counts.join('->')) {
     return {
       ok: false,
-      problem: `${path} records the curve ${stamp.counts.join('->')}, but git measures ${measured.join('->')}`,
+      problem: `${path} records the curve ${stamp.counts.join('->')}, but git measures ${curve.join('->')}`,
     };
   }
 
@@ -736,7 +852,8 @@ function main() {
   const examined = [];
 
   for (const path of changed) {
-    const { kind, points, trunkName } = measureCurve(repoDir, path, branch);
+    const measurement = measureCurve(repoDir, path, branch);
+    const { kind, points, trunkName } = measurement;
     if (points.length === 0) continue;
 
     const last = points[points.length - 1];
@@ -782,7 +899,7 @@ function main() {
       // curve to record. Asking it for a stamp asks for provenance of an event
       // that did not happen.
       if (reason !== 'floor') {
-        const { ok, problem } = verifyStamp(repoDir, path, branch);
+        const { ok, problem } = verifyStamp(repoDir, path, branch, measurement);
         if (!ok) {
           unproved.push({
             path,
