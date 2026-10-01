@@ -1,10 +1,10 @@
 # Scope: who made a fall at a merge
 
-Status: proposed. Review this before implementation. It follows PR #8 and replaces PR #9.
+Status: proposed. It follows PR #8 and replaces PR #9.
 
 ## Problem
 
-The gate takes the highest point of a curve as the baseline. This is correct only when the branch made each fall. A merge commit can take the full version of a document from another parent, and then the branch writes nothing.
+The baseline is the peak of the curve, which is correct only when the branch made each fall. A merge can take the full document from another parent.
 
 Example, a stacked branch:
 
@@ -13,16 +13,13 @@ Example, a stacked branch:
 3. The child merges the trunk and takes the 140-word version of the trunk.
 4. The child adds 60 words. It does not distil them.
 
-The gate measures `[160, 0, 60]` on main. The peak is 160 and the target is 80, so the 60 words pass. The child did not remove the 160 words. The gate run of the parent pull request judged them.
+Main measures `[160, 0, 60]`: target 80, so the 60 words pass. The parent removed the 160 words, not the child.
 
 ## Rejected rules
 
-PR #9 removed all points before a fall at a merge. Review found four incorrect results:
+PR #9 removed all points before a fall at a merge. Review found four errors:
 
-1. A branch distils 200 to 90 and then merges a trunk that changed 10 other lines. Blocked.
-2. A branch cuts 200 to 90 during conflict resolution in the merge commit. Blocked.
-3. A `-s ours` side merge. Blocked, because the rule compared with the previous commit in `rev-list` order, not with the first parent.
-4. A merge moves 260 draft words into a fence. The peak goes below the 50-word floor, the floor passes the document, and the stamp check and parking report do not run.
+shapes 2, 3 and 4 below were blocked, and shape 5 passed on the floor without the stamp check or parking report. Shape 4 failed because the rule compared with the previous commit in `rev-list` order, not with the first parent.
 
 A line rule also fails: "a line that leaves at a merge is a cut of the branch only when the first parent had it and the other parent did not." In the example, the 160 words are exactly such lines. A line does not show which resolver choice removed it.
 
@@ -33,15 +30,15 @@ At a merge commit, the gate measures a document from that merge on when both con
 - The document at the merge is byte-identical to the document at a trunk parent. A trunk parent is a parent other than the first parent that is an ancestor of the merge base.
 - The document at the merge is different from the document at the first parent.
 
-When both conditions are true, the earlier points measure prose that the document does not contain now. The latest such merge applies.
+The earlier points then measure prose the document does not contain. The latest such merge applies.
 
-A side branch never causes a restart. Thus an author cannot use a side branch to put a draft into a fence, merge it, and avoid the stamp check.
+A side branch never causes a restart, so it cannot hide a fenced draft from the stamp check (shape 6).
 
 A restart only removes peak candidates. The merge point bills the prose that the document contains at the merge.
 
 ## Shapes
 
-Each shape gets a test that builds the history in a temporary repository. Write each test before the code, and make it fail on main.
+Each shape gets a test, written first, that builds the history in a temporary repository.
 
 | # | History | Curve | Verdict |
 | --- | --- | --- | --- |
