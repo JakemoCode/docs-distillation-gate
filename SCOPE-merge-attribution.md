@@ -1,3 +1,4 @@
+<!-- distilled: 850429f:SCOPE-merge-attribution.md 1312->709->606 (46.2%) pass=2 -->
 # Scope: who made a fall at a merge
 
 Status: proposed. It follows PR #8 and replaces PR #9.
@@ -17,9 +18,7 @@ Main measures `[160, 0, 60]`: target 80, so the 60 words pass. The parent remove
 
 ## Rejected rules
 
-PR #9 removed all points before a fall at a merge. Review found four errors:
-
-shapes 2, 3 and 4 below were blocked, and shape 5 passed on the floor without the stamp check or parking report. Shape 4 failed because the rule compared with the previous commit in `rev-list` order, not with the first parent.
+PR #9 removed all points before a fall at a merge. Review found four errors: shapes 2, 3 and 4 below were blocked, and shape 5 passed on the floor without the stamp check or parking report. Shape 4 failed because the rule compared with the previous commit in `rev-list` order, not with the first parent.
 
 A line rule also fails: "a line that leaves at a merge is a cut of the branch only when the first parent had it and the other parent did not." In the example, the 160 words are exactly such lines. A line does not show which resolver choice removed it.
 
