@@ -84,7 +84,20 @@ export function verdict(counts) {
 }
 
 // Doc-distill-override: docs/wire-protocol.md would delete the wire format table
-const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(\S+)\s*(.*)$/;
+const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(.*)$/;
+
+/**
+ * The file a trailer names, and its reason. A gated name may hold a space, so
+ * the longest gated file the text starts with names it; otherwise the first
+ * word does, so the problem the gate reports names what the author wrote.
+ */
+function overrideTarget(text, gatedFiles) {
+  const file =
+    [...gatedFiles]
+      .filter((gated) => text === gated || (text.startsWith(gated) && /^\s/.test(text.slice(gated.length))))
+      .sort((a, b) => b.length - a.length)[0] ?? text.split(/\s/)[0];
+  return { file, reason: text.slice(file.length).trim() };
+}
 
 /**
  * Read every override trailer from the commits of a branch.
@@ -101,8 +114,7 @@ export function parseOverrides(commits, gatedFiles) {
       const found = OVERRIDE_TRAILER.exec(line.trim());
       if (found === null) continue;
 
-      const file = found[1];
-      const reason = found[2].trim();
+      const { file, reason } = overrideTarget(found[1], gatedFiles);
 
       let problem = null;
       if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
@@ -352,16 +364,18 @@ let diffMergesSupported = true;
  * correct, so it is rethrown.
  */
 function nameStatus(repoDir, sha) {
-  const base = ['show', RENAME_THRESHOLD, '--name-status', '-z', '--format='];
-  if (!diffMergesSupported) return nameStatusEntries(git(repoDir, ...base, sha));
+  const show = (...flags) => git(repoDir, 'show', RENAME_THRESHOLD, '--name-status', '-z', '--format=', ...flags, sha);
+  if (!diffMergesSupported) return nameStatusEntries(show());
 
+  let output;
   try {
-    return nameStatusEntries(git(repoDir, ...base, '--diff-merges=first-parent', sha));
+    output = show('--diff-merges=first-parent');
   } catch (error) {
     if (!/diff-merges/.test(String(error.stderr ?? ''))) throw error;
     diffMergesSupported = false;
-    return nameStatusEntries(git(repoDir, ...base, sha));
+    output = show();
   }
+  return nameStatusEntries(output);
 }
 
 /**
@@ -689,6 +703,12 @@ function baselineOf(repoDir, path, points) {
   return { baseline: peak.count, rev: `${short}:${peak.name}` };
 }
 
+/** A stamp's revision as the commit and name baselineOf wrote. git reads `<rev>:<path>` at the first colon, and a name may hold more. */
+function stampRevParts(rev) {
+  const colon = rev.indexOf(':');
+  return colon === -1 ? { sha: rev, name: undefined } : { sha: rev.slice(0, colon), name: rev.slice(colon + 1) };
+}
+
 /**
  * Prove a document's stamp against git.
  *
@@ -706,18 +726,17 @@ export function verifyStamp(repoDir, path, branch = branchOf(repoDir), measured 
 
   // The field is a command, not a label: git show it and the draft comes back,
   // under the name it was drafted with. That is the one name a rename cannot
-  // invalidate.
+  // invalidate. The stamp is text a pull request wrote, so a revision that
+  // git would read as an option never reaches it; no revision starts with `-`.
   try {
+    if (stamp.rev.startsWith('-')) throw new Error('an option, not a revision');
     git(repoDir, 'show', stamp.rev);
   } catch {
     return { ok: false, problem: `${stamp.rev} does not resolve` };
   }
 
   const { points, reached } = measured ?? measureCurve(repoDir, path, branch);
-  // git reads `<rev>:<path>` at the first colon, and a name may hold more.
-  const colon = stamp.rev.indexOf(':');
-  const draftSha = colon === -1 ? stamp.rev : stamp.rev.slice(0, colon);
-  const draftName = colon === -1 ? undefined : stamp.rev.slice(colon + 1);
+  const { sha: draftSha, name: draftName } = stampRevParts(stamp.rev);
   const drafted = points.find((point) => point.sha.startsWith(draftSha) && point.name === draftName);
   const commits = branch.commits.filter((sha) => sha.startsWith(draftSha));
   if (drafted === undefined && commits.some((sha) => reached.has(sha))) {
