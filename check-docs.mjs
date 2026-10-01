@@ -84,8 +84,24 @@ export function verdict(counts) {
 }
 
 // Doc-distill-override: docs/wire-protocol.md would delete the wire format table
-// A bare trailer is not one: a folded trailer carries its value on the next line.
-const OVERRIDE_TRAILER = /^Doc-distill-override:\s*(\S.*)$/;
+//
+// git reads it from the trailer block and unfolds it, so a body line that
+// starts the same way is prose, and a value folded onto the next line counts.
+const OVERRIDE_FORMAT = '%h%x00%an%x00%(trailers:key=Doc-distill-override,valueonly,unfold)%x1e';
+
+/** Each commit in `range` with the values of its override trailers. */
+export function overrideCommits(repoDir, range) {
+  return git(repoDir, 'log', `--format=${OVERRIDE_FORMAT}`, range)
+    .split('\u001e')
+    .filter((record) => record.trim() !== '')
+    .map((record) => {
+      const [sha, author, listed] = record.replace(/^\n/, '').split('\u0000');
+      // valueonly ends each value with a newline, and a trailer with no value
+      // is an empty line, which stays so it can be reported.
+      const values = listed === '' ? [] : listed.replace(/\n$/, '').split('\n');
+      return { sha, author, values };
+    });
+}
 
 /**
  * The file a trailer names, and its reason. A gated name may hold a space, so
@@ -100,7 +116,8 @@ function overrideTarget(text, gatedFiles) {
 }
 
 /**
- * Read every override trailer from the commits of a branch.
+ * Read every override from the commits of a branch, each `{ sha, author,
+ * values }` as overrideCommits returns them.
  *
  * The trailer must name a gated file and carry a reason. Nothing here can
  * verify that the reason is true, so the control is attribution: each override
@@ -109,15 +126,13 @@ function overrideTarget(text, gatedFiles) {
 export function parseOverrides(commits, gatedFiles) {
   const overrides = [];
 
-  for (const { sha, author, message } of commits) {
-    for (const line of message.split('\n')) {
-      const found = OVERRIDE_TRAILER.exec(line.trim());
-      if (found === null) continue;
-
-      const { file, reason } = overrideTarget(found[1], gatedFiles);
+  for (const { sha, author, values } of commits) {
+    for (const value of values) {
+      const { file, reason } = overrideTarget(value.trim(), gatedFiles);
 
       let problem = null;
-      if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
+      if (file === '') problem = 'the override names no file';
+      else if (!gatedFiles.has(file)) problem = `${file} is not a gated file`;
       else if (reason === '') problem = 'the override carries no reason';
 
       overrides.push({ sha, author, file, reason, valid: problem === null, problem });
@@ -826,20 +841,6 @@ function gatedFilesAtHead(repoDir) {
   return new Set(git(repoDir, 'ls-tree', '-r', '-z', '--name-only', 'HEAD').split('\0').filter(isGated));
 }
 
-function commitsOf(repoDir, mergeBase) {
-  const RECORD = '\u001e';
-  const FIELD = '\u0000';
-  const raw = git(repoDir, 'log', '--format=%h%x00%an%x00%B%x1e', `${mergeBase}..HEAD`);
-
-  return raw
-    .split(RECORD)
-    .filter((record) => record.trim() !== '')
-    .map((record) => {
-      const [sha, author, message] = record.replace(/^\n/, '').split(FIELD);
-      return { sha, author, message };
-    });
-}
-
 const PIPELINE = `Then, in this order:
 
   1. Convert to ASD-STE100 Simplified Technical English. Grammar only.
@@ -887,7 +888,7 @@ function main() {
   const mergeBase = branch.mergeBase;
   const changed = changedGatedFiles(repoDir, mergeBase);
 
-  const overrides = parseOverrides(commitsOf(repoDir, mergeBase), gatedFilesAtHead(repoDir));
+  const overrides = parseOverrides(overrideCommits(repoDir, `${mergeBase}..HEAD`), gatedFilesAtHead(repoDir));
   const overridden = new Set(overrides.filter((o) => o.valid).map((o) => o.file));
 
   const blocks = [];
