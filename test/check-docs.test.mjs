@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2227,6 +2227,27 @@ test('the stamp the gate prints for a name with a colon proves itself', async (t
 
   assert.deepEqual(verifyStamp(r.dir, 'docs/a:b.md'), { ok: true, problem: null });
   assert.equal(runCli(r.dir).code, 0);
+});
+
+test('an override names a gated document whose name holds a space', async (t) => {
+  const r = shapeRepo(t);
+  r.write('docs/a b.md', lines(300, 'draft'));
+  r.commit('docs: draft');
+  r.write('docs/a b.md', lines(290, 'draft'));
+  r.commit('docs: a weak pass\n\nDoc-distill-override: docs/a b.md the table cannot shrink');
+
+  const run = runCli(r.dir);
+  assert.equal(run.code, 0, run.stdout);
+});
+
+// A stamp is text in a pull request. Its revision must never reach git as an option.
+test('a stamp whose revision looks like an option is refused before git reads it', async (t) => {
+  const r = distilledBranch(t);
+  stampWith(r, '<!-- distilled: --output=written-by-stamp 100->40 (40.0%) pass=1 -->');
+
+  const { ok, problem } = verifyStamp(r.dir, 'docs/x.md');
+  assert.deepEqual([ok, problem], [false, '--output=written-by-stamp does not resolve']);
+  assert.equal(existsSync(join(r.dir, 'written-by-stamp')), false);
 });
 
 test('the stamp the gate prints for a name with a space proves itself', async (t) => {
