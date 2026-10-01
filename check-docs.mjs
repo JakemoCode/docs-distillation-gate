@@ -410,12 +410,49 @@ export function mergeBaseOf(repoDir) {
   throw new Error(`cannot find ${BASE_BRANCH} or origin/${BASE_BRANCH} to measure against`);
 }
 
+/**
+ * The branch commits made before the branch last merged the trunk, each with
+ * the trunk commit it was built on. Every other commit descends from the merge
+ * base, so a branch that never merged the trunk costs one rev-list. A commit
+ * that shares no history with the trunk, as a subtree import brings in, has no
+ * base of its own and is measured against the merge base alone.
+ */
+function preMergeBases(repoDir, mergeBase, commits) {
+  const bases = new Map();
+  if (commits.length === 0) return bases;
+
+  const after = new Set(git(repoDir, 'rev-list', '--ancestry-path', `${mergeBase}..${commits[0]}`).split('\n'));
+  for (const sha of commits.filter((commit) => !after.has(commit))) {
+    try {
+      bases.set(sha, git(repoDir, 'merge-base', mergeBase, sha).trim());
+    } catch {
+      // no common ancestor
+    }
+  }
+  return bases;
+}
+
+/**
+ * The line numbers of `sha`'s copy of the document that are not in `base`'s.
+ * The flags switch off diff config that would change the hunk headers: an
+ * external driver, a textconv, forced colour, or a `-diff` or `binary`
+ * attribute hides them, so the edit passes unmeasured, and inter-hunk context
+ * fuses two hunks, so the unchanged lines between them are billed.
+ */
+function addedSince(repoDir, base, sha, names) {
+  return addedLineNumbers(
+    git(repoDir, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--text', '--inter-hunk-context=0',
+      RENAME_THRESHOLD, '--unified=0', base, sha, '--', ...names),
+  );
+}
+
 /** The branch commits, newest first, and the merge base they are measured from. */
 export function branchOf(repoDir) {
   const mergeBase = mergeBaseOf(repoDir);
   const revList = git(repoDir, 'rev-list', `${mergeBase}..HEAD`).trim();
+  const commits = revList === '' ? [] : revList.split('\n');
 
-  return { mergeBase, commits: revList === '' ? [] : revList.split('\n') };
+  return { mergeBase, commits, preMerge: preMergeBases(repoDir, mergeBase, commits) };
 }
 
 /**
@@ -429,6 +466,7 @@ export function branchOf(repoDir) {
  */
 export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
   const { mergeBase, commits: newestFirst } = branch;
+  const preMerge = branch.preMerge ?? preMergeBases(repoDir, mergeBase, newestFirst);
 
   const { history, beforeBranch } = nameHistory(repoDir, path, newestFirst);
   const names = [...new Set([...history.map((entry) => entry.name), beforeBranch])];
@@ -460,18 +498,27 @@ export function measureCurve(repoDir, path, branch = branchOf(repoDir)) {
     const text = blobAt(repoDir, sha, name);
     if (text === null) continue; // the document did not exist yet
 
-    const chargeable =
-      kind === 'new'
-        ? null
-        : addedLineNumbers(
-            git(repoDir, 'diff', RENAME_THRESHOLD, '--unified=0', mergeBase, sha, '--', ...names),
-          );
+    // A line is the branch's own when it is new against both the current merge
+    // base and the trunk commit this commit was built on. Against the current
+    // base alone, a commit from before a trunk merge reads the trunk's later
+    // rewrite, undone, as prose it added. Against its own base alone, a commit
+    // whose lines the trunk has since taken, as a squash merge of a parent pull
+    // request does, bills them once there and drops them after the merge, a
+    // fall that would read as distillation.
+    let chargeable = null;
+    if (kind === 'edit') {
+      chargeable = addedSince(repoDir, mergeBase, sha, names);
+      if (preMerge.has(sha)) {
+        const sinceOwn = addedSince(repoDir, preMerge.get(sha), sha, names);
+        chargeable = new Set([...chargeable].filter((line) => sinceOwn.has(line)));
+      }
+    }
 
     const { prose, hidden } = countWords(text, chargeable);
     points.push({ sha, name, count: prose, hidden, text });
   }
 
-  return { kind, points, mergeBase, trunkName };
+  return { kind, points, trunkName };
 }
 
 /** The index of the first highest point: the draft, after STE has raised it. */
@@ -531,7 +578,7 @@ function baselineOf(repoDir, path, points) {
  * commit, so the claim outlives the evidence for it, and a stamp nobody proved
  * while the branch existed can never be proved afterwards.
  */
-export function verifyStamp(repoDir, path) {
+export function verifyStamp(repoDir, path, branch = branchOf(repoDir)) {
   const stamp = readStamp(blobAt(repoDir, 'HEAD', path) ?? '');
   if (stamp === null) return { ok: false, problem: `${path} carries no stamp` };
 
@@ -544,7 +591,7 @@ export function verifyStamp(repoDir, path) {
     return { ok: false, problem: `${stamp.rev} does not resolve` };
   }
 
-  const { points } = measureCurve(repoDir, path);
+  const { points } = measureCurve(repoDir, path, branch);
   const draftSha = stamp.rev.split(':')[0];
   const drafted = points.find((point) => point.sha.startsWith(draftSha));
   if (drafted === undefined) {
@@ -689,7 +736,7 @@ function main() {
   const examined = [];
 
   for (const path of changed) {
-    const { kind, points, mergeBase, trunkName } = measureCurve(repoDir, path, branch);
+    const { kind, points, trunkName } = measureCurve(repoDir, path, branch);
     if (points.length === 0) continue;
 
     const last = points[points.length - 1];
@@ -735,7 +782,7 @@ function main() {
       // curve to record. Asking it for a stamp asks for provenance of an event
       // that did not happen.
       if (reason !== 'floor') {
-        const { ok, problem } = verifyStamp(repoDir, path);
+        const { ok, problem } = verifyStamp(repoDir, path, branch);
         if (!ok) {
           unproved.push({
             path,
