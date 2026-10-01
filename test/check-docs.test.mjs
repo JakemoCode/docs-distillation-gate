@@ -21,6 +21,7 @@ const {
   hiddenWords,
   isGated,
   measureCurve,
+  overrideCommits,
   parseOverrides,
   proseWords,
   readStamp,
@@ -99,6 +100,21 @@ test('readStamp parses every field of a stamp', () => {
     converged: true,
     pass: 4,
   });
+});
+
+test('readStamp reads a revision with spaces, whatever spacing precedes the curve', () => {
+  const stamp = readStamp('<!-- distilled: a1b2c3d:docs/a b.md   100->40 (40.0%) pass=1 -->');
+  assert.equal(stamp.rev, 'a1b2c3d:docs/a b.md');
+  assert.equal(readStamp('<!-- distilled: 100->40 (40.0%) pass=1 -->'), null);
+});
+
+// A document's author writes its first line. A long run of spaces in it must
+// not turn the gate's parse into a backtrack per space.
+test('readStamp reads a first line with a long run of spaces in linear time', () => {
+  const line = `<!-- distilled: x${' '.repeat(100_000)}y -->`;
+  const started = performance.now();
+  assert.equal(readStamp(line), null);
+  assert.ok(performance.now() - started < 500, `took ${Math.round(performance.now() - started)}ms`);
 });
 
 test('readStamp reports an unstamped document as null', () => {
@@ -850,6 +866,39 @@ test('an override line in the body, outside the trailer block, is not an overrid
   assertNoCrash(run);
   assert.equal(run.code, 1);
   assert.doesNotMatch(run.stdout, /Override: docs\/new\.md/);
+  assert.match(run.stdout, /has a Doc-distill-override line outside its trailer block, so it does not count/);
+});
+
+// A configured trailer key lets git read a last paragraph that is only partly
+// trailers. The gate leaves global config out, so this machine and CI agree.
+test("a contributor's trailer config does not widen what counts as an override", async (t) => {
+  const r = branchWithBlock(t);
+  const home = mkdtempSync(join(tmpdir(), 'doc-gate-home-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, '.gitconfig'), '[trailer "ddo"]\n\tkey = Doc-distill-override\n');
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: keep the table\n\nThe table is load-bearing.\nDoc-distill-override: docs/new.md would delete the table');
+
+  const run = runCli(r.dir, { GIT_CONFIG_GLOBAL: join(home, '.gitconfig') });
+
+  assertNoCrash(run);
+  assert.equal(run.code, 1);
+  assert.doesNotMatch(run.stdout, /Override: docs\/new\.md/);
+});
+
+test('overrideCommits reads every trailer value, empty ones included, in any key case', async (t) => {
+  const r = branchWithBlock(t);
+  r.git('commit', '-q', '--allow-empty', '-m',
+    'docs: two waivers\n\nDoc-distill-override:\nSigned-off-by: Ada <ada@example.com>\ndoc-distill-override: docs/new.md two\nDOC-DISTILL-OVERRIDE: docs/other.md three');
+  r.git('commit', '-q', '--allow-empty', '-m', 'docs: nothing to waive');
+
+  const commits = overrideCommits(r.dir, 'main..HEAD').map(({ values, unread }) => ({ values, unread }));
+
+  assert.deepEqual(commits, [
+    { values: [], unread: false },
+    { values: ['', 'docs/new.md two', 'docs/other.md three'], unread: false },
+    { values: [], unread: false },
+  ]);
 });
 
 test('an override trailer with no value is reported as naming no file', async (t) => {
